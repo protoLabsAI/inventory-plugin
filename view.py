@@ -238,7 +238,7 @@ PAGE = r"""<!doctype html>
       '<td class="num">' + fmt(l.acquisition_cost) + '</td><td class="num">' + l.counts.total + ' <span class="muted">(' + l.counts.sold + " sold)</span></td>" +
       '<td class="num">' + fmt(l.remaining.target) + '<span class="sub">' + fmt(l.remaining.low) + " – " + fmt(l.remaining.high) + "</span></td>" +
       '<td class="num">' + fmt(l.realized.net) + '</td><td class="num">' + (l.projected_net_at_target >= 0 ? "+" : "") + fmt(l.projected_net_at_target) + "</td>" +
-      '<td class="actions"><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="editlot" data-id="' + esc(l.id) + '">Edit</button><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="dellot" data-id="' + esc(l.id) + '" aria-label="Delete">✕</button></td></tr>").join("");
+      '<td class="actions"><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="editlot" data-id="' + esc(l.id) + '">Edit</button><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="dellot" data-id="' + esc(l.id) + '" aria-label="Delete">✕</button></td></tr>').join("");
     return '<table class="pl-table"><thead><tr><th>ID</th><th>Lot</th><th>Acquired</th><th class="num">Cost</th><th class="num">Items</th><th class="num">Remaining @ target</th><th class="num">Realized net</th><th class="num">Projected net</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
   function renderSales() {

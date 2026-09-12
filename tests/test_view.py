@@ -52,3 +52,24 @@ def test_every_text_the_page_renders_from_data_is_escaped():
     body = PAGE.split("function renderItems", 1)[1]
     for raw in ("it.name +", "it.notes +", "it.price_basis +", "l.name +", "a.changes +"):
         assert raw not in body, f"unescaped interpolation: {raw}"
+
+
+def test_the_module_script_parses(tmp_path):
+    """A single bad quote in a template string kills the whole module before any wiring
+    runs — the page renders its chrome and nothing else, with no error banner. Node's
+    parser is the only honest check; skipped where node is not installed."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    from inventory_plugin.view import PAGE
+
+    module = re.search(r'<script type="module">(.*?)</script>', PAGE, re.S).group(1)
+    head = re.search(r"<script>(.*?)</script>", PAGE, re.S).group(1)
+    for label, src, args in (("module", module, ["--input-type=module", "--check"]), ("head", head, ["--check", "-"])):
+        r = subprocess.run([node, *args], input=src, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, f"{label} script does not parse:\n{r.stderr[:800]}"
