@@ -1,6 +1,6 @@
 [project]
 name = "inventory-plugin"
-version = "0.1.1"
+version = "0.2.0"
 description = "Resale inventory as a source of truth for protoAgent — lots, items, listings, sales, price evidence, audit"
 requires-python = ">=3.11"
 
