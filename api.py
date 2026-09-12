@@ -3,6 +3,7 @@ operator script with the bearer) drives. Same store, same audit trail, actor "co
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from .store import InventoryError, InventoryStore, normalize_status
@@ -107,9 +108,16 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
 
     @r.put("/items/{item_id}")
     async def _put_item(item_id: str, body: dict) -> dict:
-        body = _guard_item_body(body)
-        if store.get_item(item_id) is None:
+        current = store.get_item(item_id)
+        if current is None:
             raise HTTPException(status_code=404, detail=f"no item {item_id!r} (POST /items creates one)")
+        if current["status"] == "sold" and body.get("status"):
+            with contextlib.suppress(InventoryError):
+                if normalize_status(body["status"])[0] == "sold":
+                    body = {
+                        k: v for k, v in body.items() if k != "status"
+                    }  # unchanged "sold" is a no-op, not a refusal
+        body = _guard_item_body(body)
         try:
             item = store.upsert_item({**body, "id": item_id}, actor=ACTOR)
         except InventoryError as exc:

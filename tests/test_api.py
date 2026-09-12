@@ -76,6 +76,15 @@ def test_errors_are_400_with_the_reason(registry):
     for status in ("sold", "Sold", "SOLD ($5)"):
         r = c.put("/api/plugins/inventory/items/X", json={"status": status})
         assert r.status_code == 400 and "sold" in r.json()["detail"], status
+    # an edit form that echoes an already-sold item's status back is a no-op, not a refusal
+    c.post("/api/plugins/inventory/items", json={"id": "S", "name": "sold thing"})
+    c.post("/api/plugins/inventory/items/S/sold", json={"price": 5, "channel": "x"})
+    r = c.put("/api/plugins/inventory/items/S", json={"name": "sold thing (fixed)", "status": "sold"})
+    assert (
+        r.status_code == 200
+        and r.json()["item"]["name"] == "sold thing (fixed)"
+        and r.json()["item"]["status"] == "sold"
+    )
     r = c.put("/api/plugins/inventory/items/X", json={"target": 12})
     assert r.status_code == 400 and "basis" in r.json()["detail"]
     assert c.put("/api/plugins/inventory/items/TYPO", json={"name": "y"}).status_code == 404
