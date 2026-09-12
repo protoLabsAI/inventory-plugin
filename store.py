@@ -462,9 +462,9 @@ class InventoryStore:
         if item_id:
             item_id = check_id("item", item_id)
         fields = self._item_fields(data)
-        if "name" in fields and not fields["name"].strip():
-            raise InventoryError("an item name cannot be blank")
         existing = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone() if item_id else None
+        if existing is not None and "name" in fields and not fields["name"].strip():
+            raise InventoryError("an item name cannot be blank")
         status_raw = data.get("status")
         if status_raw is not None and str(status_raw).strip() != "":
             status, _ = normalize_status(status_raw)
@@ -476,7 +476,7 @@ class InventoryStore:
             raise InventoryError(f"no lot {lot_id!r}; create it first (or import the lots sheet before the items)")
         ts = now_iso()
         if existing is None:
-            if not fields.get("name"):
+            if not (fields.get("name") or "").strip():
                 raise InventoryError(
                     "a new item needs a name" + (f" (no item {item_id!r} exists to update)" if item_id else "")
                 )
