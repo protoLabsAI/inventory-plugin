@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import logging
 
-from .store import InventoryError, InventoryStore
+from .store import InventoryError, InventoryStore, normalize_status
+
+#: Target fields never travel through the generic item write — they need a basis (POST /price).
+_PRICE_ONLY = ("target", "target_low", "target_high", "price_basis", "price_updated_on")
 
 log = logging.getLogger("protoagent.plugins.inventory")
 
@@ -69,8 +72,22 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             _raise(exc)
         return {"items": items, "count": len(items)}
 
+    def _guard_item_body(body: dict) -> dict:
+        if any(k in body for k in _PRICE_ONLY):
+            raise HTTPException(status_code=400, detail="targets need a basis — set them via POST /items/{id}/price")
+        status = body.get("status")
+        if status:
+            try:
+                is_sold = normalize_status(status)[0] == "sold"
+            except InventoryError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if is_sold:
+                raise HTTPException(status_code=400, detail="record a sale via POST /items/{id}/sold")
+        return body
+
     @r.post("/items")
     async def _create_item(body: dict) -> dict:
+        body = _guard_item_body(body)
         try:
             item = store.upsert_item(
                 {k: v for k, v in body.items() if k != "id"} | ({"id": body["id"]} if body.get("id") else {}),
@@ -90,8 +107,9 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
 
     @r.put("/items/{item_id}")
     async def _put_item(item_id: str, body: dict) -> dict:
-        if body.get("status") == "sold":
-            raise HTTPException(status_code=400, detail="record a sale via POST /items/{id}/sold")
+        body = _guard_item_body(body)
+        if store.get_item(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"no item {item_id!r} (POST /items creates one)")
         try:
             item = store.upsert_item({**body, "id": item_id}, actor=ACTOR)
         except InventoryError as exc:
@@ -109,6 +127,8 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     @r.post("/items/{item_id}/price")
     async def _price(item_id: str, body: dict) -> dict:
         obs = body.get("observation") or None
+        if obs is not None and not isinstance(obs, dict):
+            raise HTTPException(status_code=400, detail="observation must be an object")
         try:
             item = store.set_price(
                 item_id,
@@ -136,9 +156,10 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
                 fees=body.get("fees") or 0,
                 shipping_charged=body.get("shipping_charged") or 0,
                 shipping_cost=body.get("shipping_cost") or 0,
-                quantity=int(body.get("quantity") or 1),
+                quantity=body.get("quantity") or 1,
                 notes=str(body.get("notes") or ""),
                 actor=ACTOR,
+                force=bool(body.get("force")),
             )
         except InventoryError as exc:
             _raise(exc)
@@ -198,13 +219,18 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         text = str(body.get("csv") or "")
         if not text.strip():
             raise HTTPException(status_code=400, detail="body.csv is empty")
-        out = import_csv(
-            store,
-            text,
-            kind=str(body.get("kind") or "auto"),
-            actor=ACTOR,
-            default_lot=str(body.get("default_lot") or ""),
-        )
+        try:
+            out = import_csv(
+                store,
+                text,
+                kind=str(body.get("kind") or "auto"),
+                actor=ACTOR,
+                default_lot=str(body.get("default_lot") or ""),
+            )
+        except (InventoryError, ValueError) as exc:
+            _raise(exc)
+        if not out.get("ok"):
+            raise HTTPException(status_code=400, detail=str(out.get("error") or "import failed"))
         emit("imported", {"kind": out.get("kind"), "created": out.get("created"), "updated": out.get("updated")})
         return out
 

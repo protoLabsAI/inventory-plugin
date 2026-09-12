@@ -68,11 +68,29 @@ def test_crud_flow_over_http(registry):
 
 def test_errors_are_400_with_the_reason(registry):
     c, _ = _client(registry)
-    r = c.post("/api/plugins/inventory/items", json={"lot_id": "L"})
+    r = c.post("/api/plugins/inventory/items", json={"notes": "no name"})
     assert r.status_code == 400 and "needs a name" in r.json()["detail"]
+    r = c.post("/api/plugins/inventory/items", json={"name": "x", "lot_id": "NOPE"})
+    assert r.status_code == 400 and "no lot 'NOPE'" in r.json()["detail"]
     c.post("/api/plugins/inventory/items", json={"id": "X", "name": "x"})
-    r = c.put("/api/plugins/inventory/items/X", json={"status": "sold"})
-    assert r.status_code == 400 and "sold" in r.json()["detail"]
+    for status in ("sold", "Sold", "SOLD ($5)"):
+        r = c.put("/api/plugins/inventory/items/X", json={"status": status})
+        assert r.status_code == 400 and "sold" in r.json()["detail"], status
+    r = c.put("/api/plugins/inventory/items/X", json={"target": 12})
+    assert r.status_code == 400 and "basis" in r.json()["detail"]
+    assert c.put("/api/plugins/inventory/items/TYPO", json={"name": "y"}).status_code == 404
+    r = c.post("/api/plugins/inventory/items/X/price", json={"target": 12, "basis": "b", "observation": ["nope"]})
+    assert r.status_code == 400
+    r = c.post(
+        "/api/plugins/inventory/items/X/price",
+        json={"target": 12, "basis": "b", "observation": {"source": "ebay_sold", "n": "nine"}},
+    )
+    assert r.status_code == 400 and "whole number" in r.json()["detail"]
+    assert (
+        c.get("/api/plugins/inventory/items/X").json()["item"]["target"] is None
+    )  # nothing written by the failed price
+    r = c.post("/api/plugins/inventory/items/X/sold", json={"price": 5, "channel": "x", "quantity": "one"})
+    assert r.status_code == 400 and "whole number" in r.json()["detail"]
     assert c.get("/api/plugins/inventory/items", params={"status": "nope"}).status_code == 400
     assert c.get("/api/plugins/inventory/summary", params={"lot_id": "nope"}).status_code == 400
     assert c.post("/api/plugins/inventory/import", json={"csv": ""}).status_code == 400

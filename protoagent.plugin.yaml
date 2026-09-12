@@ -15,7 +15,7 @@ description: >-
   `plugins: { enabled: [inventory] }`.
 enabled: false
 repository: https://github.com/protoLabsAI/inventory-plugin
-min_protoagent_version: "0.27.0"
+min_protoagent_version: "0.148.0"   # sdk.plugin_store (the instance-scoped store) first shipped in 0.148
 
 config_section: inventory
 config:
@@ -31,11 +31,13 @@ config:
 settings:
   - { key: workspace_dir, label: "Workspace directory", type: path, path_kind: dir, description: "Relative paths given to inventory_import_csv / inventory_export_csv resolve here. Point it at the agent workspace." }
 
-events:
-  - inventory.item.changed     # {id, action}
-  - inventory.lot.changed      # {id}
-  - inventory.sale.recorded    # {item_id, sale_id, net, channel}
-  - inventory.imported         # {kind, created, updated}
+# Event bus (ADR 0039): the topics this plugin publishes.
+emits:
+  - { topic: inventory.item.changed, summary: "an item was created, updated, priced, listed or deleted ({id, action})" }
+  - { topic: inventory.lot.changed, summary: "a lot was created, updated or deleted ({id})" }
+  - { topic: inventory.sale.recorded, summary: "a sale was recorded ({item_id, sale_id, net, channel})" }
+  - { topic: inventory.imported, summary: "a CSV was imported ({kind, created, updated})" }
+subscribes: []
 
 capabilities:
   network: []

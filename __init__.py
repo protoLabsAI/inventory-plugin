@@ -29,7 +29,7 @@ def resolve_db_path(cfg: dict, plugin_id: str = PLUGIN_ID) -> Path:
         try:
             from infra.paths import instance_paths  # host-only
 
-            return Path(instance_paths().root) / "plugins-data" / plugin_id / "inventory.db"
+            return Path(instance_paths().store(plugin_id)) / "inventory.db"
         except Exception:  # noqa: BLE001
             return Path.home() / ".protoagent" / "plugins-data" / plugin_id / "inventory.db"
 

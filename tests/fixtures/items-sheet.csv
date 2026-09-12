@@ -1,8 +1,8 @@
 inventory_id,lot_id,category,item,unit_quantity,model_count,notes,target_low_usd,target_high_usd,target_price_usd,gw_estimate_usd,discount_estimate,status,sold_price_usd,inventory_date,price_source,price_last_updated
-ARM-SM-001,ARMAGEDDON-2026-07,Space Marines,Captain with Relic Shield,1,1,"Relic shield, power sword",20.00,20.00,20.00,43.50,54%,Available,,2026-07,ThriftHammer market analysis,2026-07
-ARM-SM-002,ARMAGEDDON-2026-07,Space Marines,Librarian,1,1,"Force staff, psychic focus",20.00,20.00,20.00,42.00,52%,Pending Sell,,2026-07,ThriftHammer market analysis,2026-07
-ARM-SM-003,ARMAGEDDON-2026-07,Space Marines,Chaplain with Jump Pack,1,1,"Vanguard leader, close combat",20.00,20.00,20.00,42.00,52%,Available,,2026-07,ThriftHammer market analysis,2026-07
-ARM-SM-004,ARMAGEDDON-2026-07,Space Marines,Ancient,1,1,"Banner stand, freehand/transfer",10.00,10.00,10.00,43.50,77%,Sold,5.00,2026-07,ThriftHammer market analysis,2026-07
-BB3-001,BLOODBOWL-2026-09,Blood Bowl Third Season Split,Brionne Barons Bretonnian Team,1,12,"Planned split; 6 Squire Linemen, 2 Catchers, 2 Throwers, 2 Grail Knight Blitzers",32.00,45.00,39.00,55.50,,Planned Split,,2026-09,Current retailer and active asking prices,2026-09-12
-BB3-002,BLOODBOWL-2026-09,Blood Bowl Third Season Split,Nehekhara Nightmares Tomb Kings Team,1,14,"Planned split; 6 Skeletons, 2 Throwers, 2 Blitzers, 4 Tomb Guardians",34.00,47.00,41.00,55.50,,Planned Split,,2026-09,Current retailer and active asking prices,2026-09-12
-BB3-003,BLOODBOWL-2026-09,Blood Bowl Third Season Split,Bretonnian Dice Set,1,0,Seven team-themed dice,12.00,21.00,17.00,,,Planned Split,,2026-09,Active asking prices only,2026-09-12
+DEMO-SM-001,DEMOLOT-2026-07,Space Marines,Captain with Relic Shield,1,1,"Relic shield, power sword",18.00,22.00,20.00,40.00,50%,Available,,2026-07,Sample market analysis,2026-07
+DEMO-SM-002,DEMOLOT-2026-07,Space Marines,Librarian,1,1,"Force staff",18.00,22.00,20.00,40.00,50%,Pending Sell,,2026-07,Sample market analysis,2026-07
+DEMO-SM-003,DEMOLOT-2026-07,Space Marines,Ancient,1,1,"Banner stand",8.00,12.00,10.00,40.00,75%,Sold,5.00,2026-07,Sample market analysis,2026-07
+DEMO-OR-001,DEMOLOT-2026-07,Orks,Warboss,1,1,"Kustom choppa",12.00,20.00,16.00,40.00,60%,Available,,2026-07,Sample market analysis,2026-07
+DEMO-BB-001,DEMOLOT-2026-09,Blood Bowl 2016 Split,Human Team,1,12,"12 players",30.00,45.00,38.00,60.00,37%,Planned Split,,2026-09,Active/retail estimate,2026-09
+DEMO-BB-002,DEMOLOT-2026-09,Blood Bowl 2016 Split,Blue Dice Set,1,0,"7 dice",12.00,18.00,15.00,,,Planned Split,,2026-09,Active asking estimate,2026-09
+DEMO-BB-003,DEMOLOT-2026-09,Blood Bowl 2016 Split,Card Lot,1,0,"Cards",8.00,12.00,10.00,,,Sold ($25),,2026-09,Active asking estimate,2026-09
