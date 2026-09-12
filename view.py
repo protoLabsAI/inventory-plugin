@@ -100,7 +100,8 @@ PAGE = r"""<!doctype html>
   const state = { tab: "items", lots: [], items: [], summary: null, sales: [], audit: [], filters: { lot: "", status: "", q: "" } };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  const fmt = (v) => (v === null || v === undefined || v === "" ? "—" : "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const fmt = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const signed = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) >= 0 ? "+" : "") + fmt(v));
   const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
 
   // RULES 2+3 — every data call goes through the kit's slug-aware, bearer-carrying fetch with a bare path.
@@ -148,7 +149,9 @@ PAGE = r"""<!doctype html>
         '<form class="pl-dialog__body" id="dlg-form"><div class="form">' + body + '</div><div class="result" id="dlg-result"></div></form>' +
         '<div class="pl-dialog__foot"><button class="pl-btn" data-x type="button">Cancel</button>' +
         (onSubmit ? '<button class="pl-btn ' + (danger ? "pl-btn--danger" : "pl-btn--primary") + '" id="dlg-ok" type="submit" form="dlg-form">' + esc(submit) + "</button>" : "") + "</div></div></div>";
-      const close = (v) => { root.innerHTML = ""; resolve(v); };
+      const onKey = (e) => { if (e.key === "Escape") close(false); };
+      const close = (v) => { document.removeEventListener("keydown", onKey); root.innerHTML = ""; resolve(v); };
+      document.addEventListener("keydown", onKey);
       root.querySelectorAll("[data-x]").forEach((b) => b.addEventListener("click", () => close(false)));
       root.querySelector(".pl-overlay").addEventListener("click", (e) => { if (e.target === e.currentTarget) close(false); });
       const form = $("#dlg-form");
@@ -160,10 +163,10 @@ PAGE = r"""<!doctype html>
         catch (err) { toast(err.message || String(err), "error"); }
         finally { if (ok) { ok.disabled = false; ok.classList.remove("pl-btn--loading"); } }
       });
-      const first = form.querySelector("input:not([readonly]),select,textarea"); if (first) first.focus();
+      const first = form.querySelector("input:not([readonly]),select,textarea"); (first || root.querySelector(".pl-dialog")).focus();
     });
   }
-  const confirm = (title, text) => dialog({ title, body: '<div class="span2">' + esc(text) + "</div>", submit: "Delete", danger: true, onSubmit: async () => true });
+  const confirm = (title, text, submit = "Confirm") => dialog({ title, body: '<div class="span2">' + esc(text) + "</div>", submit, danger: true, onSubmit: async () => true });
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
@@ -172,18 +175,22 @@ PAGE = r"""<!doctype html>
     const [lots, summary, items] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString())]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items;
   }
+  let inflight = 0;
   async function refresh() {
+    const mine = ++inflight;  // a slower earlier load must not paint over a newer one
     clearErr();
     try {
       await loadCore();
       if (state.tab === "sales") state.sales = (await api("/sales" + (state.filters.lot ? "?lot_id=" + encodeURIComponent(state.filters.lot) : ""))).sales;
       if (state.tab === "activity") state.audit = (await api("/audit?limit=200")).audit;
+      if (mine !== inflight) return;
       render();
-    } catch (e) { showErr(e); }
+    } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
 
   // ── render ───────────────────────────────────────────────────────────────────
   function render() {
+    if (state.filters.lot && !state.lots.some((l) => l.id === state.filters.lot)) state.filters.lot = "";  // the lot is gone
     const sel = $("#f-lot"); const cur = state.filters.lot;
     sel.innerHTML = '<option value="">All lots</option>' + state.lots.map((l) => '<option value="' + esc(l.id) + '"' + (l.id === cur ? " selected" : "") + ">" + esc(l.name || l.id) + "</option>").join("");
     renderStats();
@@ -205,10 +212,9 @@ PAGE = r"""<!doctype html>
       tile(fmt(t.acquisition_cost), "Lot cost", lot ? lot.acquired_on : (s.lots.length + " lots")) +
       tile(fmt(t.remaining.target), "Remaining at target", fmt(t.remaining.low) + " – " + fmt(t.remaining.high)) +
       tile(fmt(t.realized_net), "Realized net", lot ? "gross " + fmt(lot.realized.gross) : "gross " + fmt(s.totals.realized_gross)) +
-      tile((t.projected_net_at_target >= 0 ? "+" : "") + fmt(t.projected_net_at_target), "Projected net at target", "if the rest sells at target") +
+      tile(signed(t.projected_net_at_target), "Projected net at target", "if the rest sells at target") +
       tile(String(t.items), "Items", t.unpriced_items ? t.unpriced_items + " unpriced" : "all priced");
   }
-  const badge = (st) => '<span class="pl-badge ' + ({ sold: "pl-badge--success", listed: "pl-badge--info", pending: "pl-badge--warning", withdrawn: "pl-badge--error" }[st] || "") + '">' + esc(st) + "</span>";
   function renderItems() {
     if (!state.items.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No items</div><div class="pl-empty__desc">Add one, or import a CSV — headers like inventory_id, item, lot_id, target_price_usd, status are recognised.</div></div>';
     const rows = state.items.map((it) => {
@@ -237,7 +243,7 @@ PAGE = r"""<!doctype html>
       '<td class="muted">' + esc(l.id) + "</td><td>" + esc(l.name) + "</td><td>" + esc(l.acquired_on) + "</td>" +
       '<td class="num">' + fmt(l.acquisition_cost) + '</td><td class="num">' + l.counts.total + ' <span class="muted">(' + l.counts.sold + " sold)</span></td>" +
       '<td class="num">' + fmt(l.remaining.target) + '<span class="sub">' + fmt(l.remaining.low) + " – " + fmt(l.remaining.high) + "</span></td>" +
-      '<td class="num">' + fmt(l.realized.net) + '</td><td class="num">' + (l.projected_net_at_target >= 0 ? "+" : "") + fmt(l.projected_net_at_target) + "</td>" +
+      '<td class="num">' + fmt(l.realized.net) + '</td><td class="num">' + signed(l.projected_net_at_target) + "</td>" +
       '<td class="actions"><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="editlot" data-id="' + esc(l.id) + '">Edit</button><button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="dellot" data-id="' + esc(l.id) + '" aria-label="Delete">✕</button></td></tr>').join("");
     return '<table class="pl-table"><thead><tr><th>ID</th><th>Lot</th><th>Acquired</th><th class="num">Cost</th><th class="num">Items</th><th class="num">Remaining @ target</th><th class="num">Realized net</th><th class="num">Projected net</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
@@ -256,21 +262,26 @@ PAGE = r"""<!doctype html>
 
   // ── actions ──────────────────────────────────────────────────────────────────
   const itemById = (id) => state.items.find((i) => i.id === id);
-  const lotOptions = () => [["", "— none —"]].concat(state.lots.map((l) => [l.id, l.name || l.id]));
+  const lotOptions = (current = "") => {
+    const opts = [["", "— none —"]].concat(state.lots.map((l) => [l.id, l.name || l.id]));
+    if (current && !state.lots.some((l) => l.id === current)) opts.push([current, "(unknown lot " + current + ")"]);
+    return opts;
+  };
 
   async function itemDialog(item) {
     const it = item || { lot_id: state.filters.lot, status: "available", quantity: 1 };
     await dialog({
       title: item ? "Edit " + item.id : "New item", submit: item ? "Save" : "Add",
-      body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions() }) +
+      body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
         field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "new on sprue, sealed, painted…" }) +
         field("status", "Status", it.status, { type: "select", options: STATUSES.filter((s) => s !== "sold" || it.status === "sold") }) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
         field("retail", "Retail ($)", it.retail ?? "", { type: "number", step: "0.01", hint: "The anchor price, not a target." }) + field("cost_basis", "Cost basis ($)", it.cost_basis ?? "", { type: "number", step: "0.01" }) +
         field("notes", "Notes", it.notes, { type: "textarea", span2: true }),
       onSubmit: async (v) => {
-        const body = { name: v.name, lot_id: v.lot_id, category: v.category, condition: v.condition, status: v.status, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
-        if (item && item.status === "sold" && v.status !== "sold") { /* allowed: un-sell by hand */ }
+        if (!v.name.trim()) throw new Error("A name is required");
+        const body = { name: v.name, lot_id: v.lot_id, category: v.category, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
+        if (!item || v.status !== item.status) body.status = v.status;  // an unchanged "sold" would be refused by the API
         if (item) await api("/items/" + encodeURIComponent(item.id), "PUT", body); else await api("/items", "POST", body);
         toast(item ? "Saved" : "Item added", "success"); await refresh();
       },
@@ -319,7 +330,7 @@ PAGE = r"""<!doctype html>
     });
   }
   async function listingDialog(id) {
-    const it = itemById(id); if (!it) return;
+    const it = (await api("/items/" + encodeURIComponent(id))).item; if (!it) return;
     const live = (it.listings || []).filter((l) => l.state === "active");
     await dialog({
       title: "Listing · " + it.name, submit: "Add listing",
@@ -362,6 +373,7 @@ PAGE = r"""<!doctype html>
     let done = false;
     const finish = async (save) => {
       if (done) return; done = true;
+      if (save && f === "name" && !input.value.trim()) { toast("A name is required", "error"); save = false; }
       if (save && String(input.value) !== String(it[f] ?? "")) {
         try { await api("/items/" + encodeURIComponent(id), "PUT", { [f]: f === "quantity" ? num(input.value) : input.value }); toast("Saved", "success"); } catch (e) { toast(e.message, "error"); }
       }
@@ -377,6 +389,7 @@ PAGE = r"""<!doctype html>
     out.querySelectorAll("[data-status]").forEach((sel) => sel.addEventListener("change", async () => {
       const id = sel.dataset.status, it = itemById(id);
       if (sel.value === "sold") { sel.value = it.status; return soldDialog(id); }
+      if (it.status === "sold" && !(await confirm("Un-sell " + id + "?", "This item has a recorded sale, which stays on the books. Only do this if the sale fell through — and consider force-recording a refund instead."))) { sel.value = it.status; return; }
       try { await api("/items/" + encodeURIComponent(id), "PUT", { status: sel.value }); toast("Status → " + sel.value, "success"); } catch (e) { toast(e.message, "error"); }
       await refresh();
     }));
@@ -386,9 +399,9 @@ PAGE = r"""<!doctype html>
       if (act === "sold") return soldDialog(id);
       if (act === "list") return listingDialog(id);
       if (act === "edit") { const full = (await api("/items/" + encodeURIComponent(id))).item; return itemDialog(full); }
-      if (act === "del") { const it = itemById(id); if (await confirm("Delete " + id + "?", "\"" + (it && it.name) + "\" and its listings, sales and price history are removed permanently. Prefer status = withdrawn or kept to keep the record.")) { try { await api("/items/" + encodeURIComponent(id), "DELETE"); toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
+      if (act === "del") { const it = itemById(id); if (await confirm("Delete " + id + "?", "\"" + (it && it.name) + "\" and its listings, sales and price history are removed permanently. Prefer status = withdrawn or kept to keep the record.", "Delete")) { try { await api("/items/" + encodeURIComponent(id), "DELETE"); toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
       if (act === "editlot") { const lot = state.lots.find((l) => l.id === id); return lotDialog(lot); }
-      if (act === "dellot") { if (await confirm("Delete lot " + id + "?", "Only an empty lot can be deleted. Items keep their history.")) { try { await api("/lots/" + encodeURIComponent(id), "DELETE"); toast("Lot deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
+      if (act === "dellot") { if (await confirm("Delete lot " + id + "?", "Only an empty lot can be deleted. Items keep their history.", "Delete")) { try { await api("/lots/" + encodeURIComponent(id), "DELETE"); if (state.filters.lot === id) state.filters.lot = ""; toast("Lot deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
     }));
   }
 
@@ -419,7 +432,7 @@ def build_view_router(cfg: dict):
 
     r = APIRouter()
 
-    @r.get(VIEW_PATH, response_class=HTMLResponse)
+    @r.get(VIEW_PATH, response_class=HTMLResponse, include_in_schema=False)
     async def _view():
         return HTMLResponse(PAGE)
 
