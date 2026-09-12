@@ -31,6 +31,19 @@ def resolve_workspace_path(cfg: dict, path: str) -> Path:
     return p
 
 
+def as_bool(value, default: bool) -> bool:
+    """A YAML/console flag: real bools pass through; the strings "false"/"no"/"0"/"off" mean
+    False; blank means unset."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return default
+        return text not in {"false", "no", "0", "off"}
+    return bool(value)
+
+
 def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: None):
     from langchain_core.tools import tool
 
@@ -295,6 +308,15 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
             return _err(exc)
 
     @tool
+    def inventory_reprice_plan(lot_id: str = "", max_items: int = 15, price_days: int = 30) -> str:
+        """The re-price worklist: unsold items whose price evidence is older than `price_days` or missing, oldest first, capped at `max_items`, each with a suggested buyer-style eBay query and its current band. Loop it: ebay_price_check (sold) → inventory_set_price with the basis and the comps."""
+        from .automations import reprice_plan
+
+        return json.dumps(
+            {"ok": True, **reprice_plan(store, lot_id=lot_id, max_items=max_items, price_days=price_days)}
+        )
+
+    @tool
     def inventory_stale(listed_days: int = 14, price_days: int = 30) -> str:
         """What needs attention: listings live longer than `listed_days`, and unsold items whose price evidence is older than `price_days` or missing. The weekly-review starting point."""
         return json.dumps({"ok": True, **store.stale(listed_days=listed_days, price_days=price_days)})
@@ -311,6 +333,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_listing,
         inventory_import_csv,
         inventory_export_csv,
+        inventory_reprice_plan,
         inventory_stale,
     ]
 

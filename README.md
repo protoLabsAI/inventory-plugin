@@ -14,9 +14,10 @@ inventory_summary()
 
 | | |
 |---|---|
-| **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_stale` |
+| **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_reprice_plan` · `inventory_stale` |
 | **View** | a rail panel: the item grid (double-click to edit name/category/condition/qty; status select; click a price for the Price dialog), Price / Sold / Listing / Edit / Delete per row, lots with their P&L, sales, an activity log, CSV import (file or paste, with the mapping report) and export |
 | **API** | bearer-gated JSON under `/api/plugins/inventory` — `summary`, `lots`, `items`, `items/{id}/price`, `items/{id}/sold`, `items/{id}/listings`, `listings/{id}/end`, `sales`, `stale`, `audit`, `import`, `export` |
+| **Automations** | `weekly_review: true` arms a plugin-owned recurring turn (`weekly_review_cron`, default Monday 09:00 in `review_timezone`) that re-prices stale evidence from eBay sold comps through the same tools, reports stale listings with a recommendation (it never changes a listing itself), and posts the per-lot P&L. Cancelled when the plugin is disabled. |
 | **Events** | `inventory.item.changed`, `inventory.lot.changed`, `inventory.sale.recorded`, `inventory.imported` |
 | **Skill** | `inventory-ops` — the rules (a target needs a basis; never set sold by hand; sold ≠ active ≠ retail) and the re-price / weekly-review routines |
 
