@@ -69,6 +69,15 @@ def register(registry) -> None:
     except Exception:  # noqa: BLE001
         log.exception("[inventory] mounting the data router failed")
 
+    # The console view: a PUBLIC page (an iframe navigation carries no bearer) on its own
+    # prefix; every byte of data it shows comes through the gated router above.
+    try:
+        from .view import build_view_router
+
+        registry.register_router(build_view_router(cfg), prefix=f"/plugins/{plugin_id}")
+    except Exception:  # noqa: BLE001
+        log.exception("[inventory] mounting the view failed")
+
     try:
         registry.register_skill_dir("skills")
     except Exception:  # noqa: BLE001

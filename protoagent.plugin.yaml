@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.1.1
+version: 0.2.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -9,10 +9,11 @@ description: >-
   audit trail of every change and who made it.
 
   Contributes agent tools for every operation (summary/P&L, list, get, upsert lot/item,
-  set price with evidence, mark sold, listings, CSV import/export, stale review) and a
-  bearer-gated JSON API under /api/plugins/inventory for the console. Money is stored as
-  integer cents and exposed as dollars. Ships DISABLED; enable with
-  `plugins: { enabled: [inventory] }`.
+  set price with evidence, mark sold, listings, CSV import/export, stale review), a
+  console rail view (a grid with inline edits, price / sold / listing dialogs, CSV
+  import/export, lots, sales and an activity log) and a bearer-gated JSON API under
+  /api/plugins/inventory. Money is stored as integer cents and exposed as dollars. Ships
+  DISABLED; enable with `plugins: { enabled: [inventory] }`.
 enabled: false
 repository: https://github.com/protoLabsAI/inventory-plugin
 min_protoagent_version: "0.148.0"   # sdk.plugin_store (the instance-scoped store) first shipped in 0.148
@@ -26,6 +27,11 @@ config:
   # Directory that relative paths in inventory_import_csv / inventory_export_csv resolve
   # against. Blank = the process working directory; set it to the agent workspace.
   workspace_dir: ""
+
+# Console view (ADR 0026): a left-rail icon whose panel iframes the page this plugin
+# serves at `path` (public prefix); its data comes through /api/plugins/inventory (gated).
+views:
+  - { id: inventory, label: "Inventory", icon: Boxes, path: /plugins/inventory/view }
 
 # Editable in Settings ▸ Plugins (ADR 0019).
 settings:

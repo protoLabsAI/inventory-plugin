@@ -15,11 +15,10 @@ def _client(registry):
     return TestClient(app), registry
 
 
-def test_no_public_route_in_this_slice(registry):
-    """Slice 1 ships the DATA API only; every route sits under the bearer-gated /api prefix.
-    (The console view lands in slice 2 with its own public page router.)"""
+def test_two_routers_two_prefixes(registry):
+    """The page on the PUBLIC prefix, the data on the GATED one — never the other way round."""
     _, reg = _client(registry)
-    assert all(prefix.startswith("/api/plugins/inventory") for _, prefix in reg.routers)
+    assert sorted(prefix for _, prefix in reg.routers) == ["/api/plugins/inventory", "/plugins/inventory"]
 
 
 def test_crud_flow_over_http(registry):
