@@ -53,8 +53,14 @@ not a note. If a number is not in the inventory, it has not been decided.
 ## Weekly review
 
 `inventory_stale` lists listings older than 14 days and items whose price evidence is
-older than 30 days. Re-price the stale prices, ask the operator about the stale listings
-(drop the price, relist, bundle, or withdraw), and finish with `inventory_summary`.
+older than 30 days. `inventory_reprice_plan` turns the stale prices into a worklist
+(oldest evidence first, capped, each with a suggested buyer-style query). Re-price them,
+ask the operator about the stale listings (drop the price, relist, bundle, or withdraw —
+never end a listing yourself), and finish with `inventory_summary`.
+
+When `weekly_review: true` is set in the plugin config, the host scheduler runs exactly
+this routine as an automated turn on `weekly_review_cron` (default Monday 09:00). It uses
+the same tools and the same rules; the only thing it never does is touch a listing.
 
 ## Importing a spreadsheet
 

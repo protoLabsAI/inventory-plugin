@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.2.0
+version: 0.3.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -9,8 +9,8 @@ description: >-
   audit trail of every change and who made it.
 
   Contributes agent tools for every operation (summary/P&L, list, get, upsert lot/item,
-  set price with evidence, mark sold, listings, CSV import/export, stale review), a
-  console rail view (a grid with inline edits, price / sold / listing dialogs, CSV
+  set price with evidence, mark sold, listings, CSV import/export, stale review, re-price
+  plan), an optional weekly-review job on the host scheduler, a console rail view (a grid with inline edits, price / sold / listing dialogs, CSV
   import/export, lots, sales and an activity log) and a bearer-gated JSON API under
   /api/plugins/inventory. Money is stored as integer cents and exposed as dollars. Ships
   DISABLED; enable with `plugins: { enabled: [inventory] }`.
@@ -27,6 +27,16 @@ config:
   # Directory that relative paths in inventory_import_csv / inventory_export_csv resolve
   # against. Blank = the process working directory; set it to the agent workspace.
   workspace_dir: ""
+  # ── Automations ── a plugin-owned recurring agent turn on the host scheduler (cancelled
+  # when the plugin is disabled). The weekly review: re-prices stale evidence from eBay
+  # sold comps (through the same tools, same rules), reports stale listings with a
+  # recommendation (never changes a listing itself), and ends with the per-lot P&L.
+  weekly_review: false
+  weekly_review_cron: "0 9 * * 1"   # Monday 09:00 in review_timezone
+  review_timezone: ""               # IANA name, e.g. America/Los_Angeles; blank = UTC
+  review_max_items: 15              # re-price at most this many items per run (eBay pacing)
+  stale_listing_days: 14            # a live listing older than this is reported
+  stale_price_days: 30              # price evidence older than this is re-checked
 
 # Console view (ADR 0026): a left-rail icon whose panel iframes the page this plugin
 # serves at `path` (public prefix); its data comes through /api/plugins/inventory (gated).
@@ -36,6 +46,12 @@ views:
 # Editable in Settings ▸ Plugins (ADR 0019).
 settings:
   - { key: workspace_dir, label: "Workspace directory", type: path, path_kind: dir, description: "Relative paths given to inventory_import_csv / inventory_export_csv resolve here. Point it at the agent workspace." }
+  - { key: weekly_review, label: "Weekly review", type: bool, description: "Arm a recurring agent turn that re-prices stale evidence from eBay sold comps, reports stale listings with a recommendation (it never changes a listing itself), and posts the per-lot P&L." }
+  - { key: weekly_review_cron, label: "Weekly review cron", type: string, description: "5-field cron, evaluated in the review timezone. Default Monday 09:00." }
+  - { key: review_timezone, label: "Review timezone", type: string, description: "IANA name such as America/Los_Angeles. Blank = UTC." }
+  - { key: review_max_items, label: "Items re-priced per run", type: number, description: "Caps eBay searches per review run; the rest wait for the next one." }
+  - { key: stale_listing_days, label: "Stale listing (days)", type: number, description: "A live listing older than this is reported in the review." }
+  - { key: stale_price_days, label: "Stale price (days)", type: number, description: "Price evidence older than this is re-checked in the review." }
 
 # Event bus (ADR 0039): the topics this plugin publishes.
 emits:
