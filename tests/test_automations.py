@@ -107,6 +107,7 @@ class TestReplan:
         assert suggest_query({"name": "Dice", "condition": ""}) == "Dice"
 
     def test_plan_orders_oldest_evidence_first_and_caps(self, store):
+        store.upsert_lot({"id": "L", "name": "L"}, actor="t")
         for i, (iid, when) in enumerate((("A", "2026-09-01"), ("B", ""), ("C", "2025-01-01"), ("D", "2026-09-10"))):
             store.upsert_item({"id": iid, "name": f"Item {iid}", "lot_id": "L"}, actor="t")
             if when:
@@ -122,6 +123,8 @@ class TestReplan:
     def test_plan_tool_and_lot_filter(self, registry):
         inventory_plugin.register(registry)
         t = {x.name: x for x in registry.tools}
+        for lot in ("L1", "L2"):
+            t["inventory_upsert_lot"].invoke({"id": lot, "name": lot})
         t["inventory_upsert_item"].invoke({"id": "X", "name": "Thing", "lot_id": "L1"})
         t["inventory_upsert_item"].invoke({"id": "Y", "name": "Other", "lot_id": "L2"})
         out = json.loads(t["inventory_reprice_plan"].invoke({"lot_id": "L1"}))
