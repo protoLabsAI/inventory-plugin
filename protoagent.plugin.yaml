@@ -1,0 +1,42 @@
+id: inventory
+name: Inventory (resale source of truth)
+version: 0.1.0
+description: >-
+  The resale inventory as a source of truth: lots (what you bought and for how much),
+  items (what each lot split into, its condition and status), listings (where each item is
+  up for sale), sales (what it actually sold for, net of fees and postage) and price
+  observations (the comps a target rests on) — in a SQLite file this plugin owns, with an
+  audit trail of every change and who made it.
+
+  Contributes agent tools for every operation (summary/P&L, list, get, upsert lot/item,
+  set price with evidence, mark sold, listings, CSV import/export, stale review) and a
+  bearer-gated JSON API under /api/plugins/inventory for the console. Money is stored as
+  integer cents and exposed as dollars. Ships DISABLED; enable with
+  `plugins: { enabled: [inventory] }`.
+enabled: false
+repository: https://github.com/protoLabsAI/inventory-plugin
+min_protoagent_version: "0.27.0"
+
+config_section: inventory
+config:
+  # Where the SQLite file lives. Blank = the host's instance-scoped plugin store
+  # (<instance>/plugins-data/inventory/inventory.db) — the dev sandbox and every fleet
+  # member get their own. Set only to point at an existing database.
+  db_path: ""
+  # Directory that relative paths in inventory_import_csv / inventory_export_csv resolve
+  # against. Blank = the process working directory; set it to the agent workspace.
+  workspace_dir: ""
+
+# Editable in Settings ▸ Plugins (ADR 0019).
+settings:
+  - { key: workspace_dir, label: "Workspace directory", type: path, path_kind: dir, description: "Relative paths given to inventory_import_csv / inventory_export_csv resolve here. Point it at the agent workspace." }
+
+events:
+  - inventory.item.changed     # {id, action}
+  - inventory.lot.changed      # {id}
+  - inventory.sale.recorded    # {item_id, sale_id, net, channel}
+  - inventory.imported         # {kind, created, updated}
+
+capabilities:
+  network: []
+  filesystem: scoped   # its own SQLite file + CSVs the operator names

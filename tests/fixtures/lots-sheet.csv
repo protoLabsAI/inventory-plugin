@@ -1,0 +1,3 @@
+lot_id,lot_name,description,acquisition_cost_usd,inventory_date,declared_total_models,declared_items_to_sell,estimated_resale_low_usd,estimated_resale_high_usd,estimated_profit_low_usd,estimated_profit_high_usd,source_note
+ARMAGEDDON-2026-07,Armageddon Box,Warhammer 40K 11th Edition Launch Box - 61 Miniatures + Rules,250.00,2026-07,61,24,490.00,700.00,240.00,450.00,Shared notes
+BLOODBOWL-2026-09,Blood Bowl Collection,"2016/4th Edition starter (sealed with shrink tear); Second Season starter sealed; Third Season starter sealed; Old World Alliance; Imperial Nobility; Chaos Dwarves; Griff Oberwald",355.00,2026-09,122,35,629.00,1056.00,274.00,701.00,Operator inventory; split-value estimates based mainly on active asks and retail anchors

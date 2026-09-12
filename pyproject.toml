@@ -1,0 +1,16 @@
+[project]
+name = "inventory-plugin"
+version = "0.1.0"
+description = "Resale inventory as a source of truth for protoAgent — lots, items, listings, sales, price evidence, audit"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
