@@ -83,4 +83,15 @@ def register(registry) -> None:
     except Exception:  # noqa: BLE001
         log.exception("[inventory] registering skills failed")
 
+    # Automations (slice 3): a plugin-owned weekly review turn on the host scheduler. Armed
+    # here so a config reload re-arms it and a disable sweeps it (#1642). Best-effort: a
+    # host without the scheduler seam just logs.
+    try:
+        from .automations import arm
+        from .tools import as_bool
+
+        arm(registry, cfg, plugin_id, enabled=as_bool(cfg.get("weekly_review"), False))
+    except Exception:  # noqa: BLE001
+        log.debug("[inventory] automations not armed (no scheduler seam on this host?)", exc_info=True)
+
     log.info("[inventory] registered")
