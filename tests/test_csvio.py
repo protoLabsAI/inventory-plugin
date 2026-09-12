@@ -14,11 +14,12 @@ class TestImport:
     def test_the_lots_sheet_is_detected_and_loaded(self, store):
         out = import_csv(store, (FIX / "lots-sheet.csv").read_text(), actor="t")
         assert out["kind"] == "lots" and out["created"] == 2 and out["warnings"] == []
-        lot = store.get_lot("BLOODBOWL-2026-09")
-        assert lot["acquisition_cost"] == 355.0 and lot["acquired_on"] == "2026-09"
-        assert "Blood Bowl" in lot["name"]
+        lot = store.get_lot("DEMOLOT-2026-09")
+        assert lot["acquisition_cost"] == 400.0 and lot["acquired_on"] == "2026-09"
+        assert "Demo" in lot["name"]
 
     def test_the_items_sheet_maps_headers_statuses_and_sales(self, store):
+        import_csv(store, (FIX / "lots-sheet.csv").read_text(), actor="t")
         out = import_csv(store, (FIX / "items-sheet.csv").read_text(), actor="t")
         assert out["kind"] == "items"
         assert out["created"] == out["rows"]  # every row landed, including the odd statuses
@@ -31,9 +32,9 @@ class TestImport:
             "price_source": "price_basis",
         }.items() <= out["mapped_columns"].items()
         assert "discount_estimate" not in out["ignored_columns"]  # known-and-deliberately-dropped, not "unknown"
-        cap = store.get_item("ARM-SM-001")
-        assert cap["target"] == 20.0 and cap["retail"] == 43.5 and cap["status"] == "available"
-        assert cap["price_basis"] == "ThriftHammer market analysis"
+        cap = store.get_item("DEMO-SM-001")
+        assert cap["target"] == 20.0 and cap["retail"] == 40.0 and cap["status"] == "available"
+        assert cap["price_basis"] == "Sample market analysis"
         sold = [i for i in store.list_items(status="sold")]
         assert sold, "the 'Sold ($5)' / 'Sold ($25)' rows must import as sales"
         for item in sold:
@@ -42,6 +43,7 @@ class TestImport:
         assert out["sales_recorded"] == len(sold)
 
     def test_reimport_updates_instead_of_duplicating(self, store):
+        import_csv(store, (FIX / "lots-sheet.csv").read_text(), actor="t")
         text = (FIX / "items-sheet.csv").read_text()
         first = import_csv(store, text, actor="t")
         second = import_csv(store, text, actor="t")
@@ -69,8 +71,10 @@ class TestImport:
 
     def test_kind_detection(self):
         assert detect_kind(["lot_id", "lot_name", "acquisition_cost_usd"]) == "lots"
+        assert detect_kind(["id", "name", "cost", "date", "source"]) == "lots"  # alias-only lots sheet
         assert detect_kind(["inventory_id", "lot_id", "item"]) == "items"
         assert detect_kind(["name", "target"]) == "items"
+        assert detect_kind(["id", "name", "cost", "status"]) == "items"  # `status` marks items
 
 
 class TestExport:

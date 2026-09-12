@@ -3,11 +3,12 @@ its actor ("agent") in the audit trail and emits an event so other plugins can r
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 from pathlib import Path
 
-from .store import STATUSES, InventoryError, InventoryStore
+from .store import STATUSES, InventoryError, InventoryStore, normalize_status
 
 log = logging.getLogger("protoagent.plugins.inventory")
 
@@ -16,6 +17,18 @@ ACTOR = "agent"
 
 def _err(exc: Exception) -> str:
     return json.dumps({"ok": False, "error": str(exc)})
+
+
+def resolve_workspace_path(cfg: dict, path: str) -> Path:
+    """A path for import/export: relative → under ``workspace_dir``; when a workspace is
+    configured, NOTHING outside it (the manifest promises ``filesystem: scoped``)."""
+    workspace = str(cfg.get("workspace_dir") or "").strip()
+    p = Path(path).expanduser()
+    base = Path(workspace).expanduser().resolve() if workspace else Path.cwd().resolve()
+    p = (p if p.is_absolute() else base / p).resolve()
+    if workspace and base not in p.parents and p != base:
+        raise InventoryError(f"{path!r} is outside the workspace ({base}); files stay inside it")
+    return p
 
 
 def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: None):
@@ -120,11 +133,11 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         ):
             if v is not None:
                 data[k] = v
-        if data.get("status") == "sold":
-            return json.dumps(
-                {"ok": False, "error": "record a sale with inventory_mark_sold, which sets status=sold itself"}
-            )
         try:
+            if data.get("status") and normalize_status(data["status"])[0] == "sold":
+                return json.dumps(
+                    {"ok": False, "error": "record a sale with inventory_mark_sold, which sets status=sold itself"}
+                )
             item = store.upsert_item(data, actor=ACTOR)
             emit("item.changed", {"id": item["id"], "action": "upsert"})
             return json.dumps({"ok": True, "item": item})
@@ -193,8 +206,9 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         shipping_cost: float = 0,
         quantity: int = 1,
         notes: str = "",
+        force: bool = False,
     ) -> str:
-        """Record a sale: writes the sale (net = price + shipping charged − fees − shipping cost), sets the item to sold, and closes its live listings. `channel` is where it sold (eBay, Facebook, local, r/miniswap …). Dollars; `sold_on` YYYY-MM-DD, default today."""
+        """Record a sale: writes the sale (net = price + shipping charged − fees − shipping cost), decrements the item's quantity or, on the last unit, sets it to sold and closes its live listings. `channel` is where it sold (eBay, Facebook, local, r/miniswap …). Dollars; `sold_on` YYYY-MM-DD, default today. An item that is already sold is refused — a retried call must not double the revenue — unless force=True."""
         try:
             sale = store.mark_sold(
                 item_id,
@@ -207,6 +221,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
                 quantity=quantity,
                 notes=notes,
                 actor=ACTOR,
+                force=force,
             )
             emit("sale.recorded", {"item_id": item_id, "sale_id": sale["id"], "net": sale["net"], "channel": channel})
             return json.dumps({"ok": True, "sale": sale})
@@ -246,30 +261,33 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
             if not text:
                 if not path:
                     return json.dumps({"ok": False, "error": "pass a path or csv_text"})
-                p = Path(path).expanduser()
-                if not p.is_absolute():
-                    p = Path(cfg.get("workspace_dir") or ".") / p
-                text = p.read_text(encoding="utf-8-sig")
+                p = resolve_workspace_path(cfg, path)
+                raw = p.read_bytes()
+                try:
+                    text = raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    text = raw.decode("cp1252")  # Excel on Windows
             from .csvio import import_csv
 
             out = import_csv(store, text, kind=kind, actor=ACTOR, default_lot=default_lot)
-            emit("imported", {"kind": out.get("kind"), "created": out.get("created"), "updated": out.get("updated")})
+            if out.get("ok"):
+                emit(
+                    "imported", {"kind": out.get("kind"), "created": out.get("created"), "updated": out.get("updated")}
+                )
             return json.dumps(out)
-        except (OSError, InventoryError) as exc:
+        except (OSError, UnicodeDecodeError, csv.Error, InventoryError, ValueError) as exc:
             return _err(exc)
 
     @tool
     def inventory_export_csv(path: str = "", kind: str = "items", lot_id: str = "", status: str = "") -> str:
-        """Write the inventory (kind=items or lots, optionally one lot / a status filter) as CSV to `path` (relative paths resolve against the agent workspace), or return the CSV text when no path is given."""
+        """Write items, lots or sales (kind=items|lots|sales; optionally one lot / a status filter) as CSV to `path` inside the agent workspace, or return the CSV text when no path is given. A spreadsheet view, not a backup: an items export carries statuses, not the sales behind them — export sales too."""
         from .csvio import export_csv
 
         try:
             text = export_csv(store, kind=kind, lot_id=lot_id, status=status)
             if not path:
                 return json.dumps({"ok": True, "csv": text})
-            p = Path(path).expanduser()
-            if not p.is_absolute():
-                p = Path(cfg.get("workspace_dir") or ".") / p
+            p = resolve_workspace_path(cfg, path)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
             return json.dumps({"ok": True, "path": str(p), "rows": max(0, text.count("\n") - 1)})

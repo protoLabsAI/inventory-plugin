@@ -1,13 +1,17 @@
 """The inventory store — SQLite, owned by this plugin, the single source of truth.
 
 Money is stored as INTEGER cents and exposed as dollars (floats) at the edges, so a
-target of $12.50 never becomes 12.499999. Every mutation writes an audit row: an
-inventory is only a source of truth if you can see who changed what, and when.
+target of $12.50 never becomes 12.499999. Every mutation writes an audit row — and a
+delete carries a snapshot of what it removed: an inventory is only a source of truth if
+you can see who changed what, and what it was before.
 
-SQLite rules (the host's own metrics store is the reference): one connection PER CALL
-(never shared across threads), ``busy_timeout`` set BEFORE ``journal_mode=WAL`` (the WAL
-transition itself takes locks), a process-wide lock around writes (busy_timeout is a
-retry loop, not a queue), and additive ``ALTER TABLE`` migrations at connect.
+SQLite rules (the host's metrics store is the reference): one connection PER CALL, closed
+in ``finally``; ``busy_timeout`` set BEFORE ``journal_mode=WAL`` (the WAL transition itself
+takes locks); every write runs inside ONE ``BEGIN IMMEDIATE`` transaction under a
+process-wide lock (busy_timeout is a retry loop, not a queue), committed on success and
+rolled back on any exception — so a sale is the sale row AND the status flip AND the
+closed listings AND the audit row, or none of them; additive ``ALTER TABLE`` migrations at
+connect.
 """
 
 from __future__ import annotations
@@ -15,11 +19,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import re
 import sqlite3
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 log = logging.getLogger("protoagent.plugins.inventory")
@@ -30,8 +36,11 @@ STATUSES = ("planned", "available", "listed", "pending", "sold", "kept", "withdr
 #: Items in these states still have value on the shelf; sold/kept/withdrawn do not count
 #: toward "what is left to sell".
 UNSOLD = ("planned", "available", "listed", "pending")
+#: States an item cannot be sold or listed from.
+CLOSED = ("sold", "kept", "withdrawn")
 LISTING_STATES = ("active", "ended", "sold")
 OBSERVATION_SOURCES = ("ebay_sold", "ebay_active", "amazon", "retail", "manual", "other")
+OBSERVATION_FIELDS = ("source", "n", "p25", "median", "p75", "query", "basis", "notes")
 
 _WRITE_LOCK = threading.Lock()
 
@@ -129,19 +138,56 @@ class InventoryError(ValueError):
 
 
 # ── money + time ─────────────────────────────────────────────────────────────────
-_MONEY_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+_MONEY_RE = re.compile(r"^([-+])?\s*[$£€¥]?\s*([-+])?\s*(\d[\d,]*(?:\.\d+)?|\d+,\d{1,2})$")
+_EURO_DECIMAL_RE = re.compile(r"^\d+,\d{1,2}$")
 
 
 def to_cents(value) -> int | None:
-    """``12.5`` / ``"12.50"`` / ``"$1,234.56"`` → cents; ``None``/blank/unparseable → ``None``."""
+    """``12.5`` / ``"12.50"`` / ``"$1,234.56"`` / ``"12,50"`` / ``"(5.00)"`` → cents.
+
+    ``None``, blank, and anything that is not a money amount → ``None`` — the CALLER decides
+    whether that means "clear" or "reject"; this never guesses a number out of "54%",
+    "2026-07" or "n/a" (an unanchored match used to read those as $54, $2,026 and nothing).
+    Rounding is half-up on the decimal text, so 1.005 is 101 cents, not 100.
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int | float):
-        return round(float(value) * 100)
-    m = _MONEY_RE.search(str(value))
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+        return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    text = str(value).strip()
+    if not text:
+        return None
+    negative = False
+    if text.startswith("(") and text.endswith(")"):
+        negative, text = True, text[1:-1].strip()
+    m = _MONEY_RE.match(text)
     if not m:
         return None
-    return round(float(m.group(0).replace(",", "")) * 100)
+    if "-" in ((m.group(1) or "") + (m.group(2) or "")):
+        negative = True
+    num = m.group(3)
+    num = num.replace(",", ".") if _EURO_DECIMAL_RE.match(num) else num.replace(",", "")
+    cents = int((Decimal(num) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return -cents if negative else cents
+
+
+_UNSET = object()
+
+
+def money_field(name: str, value):
+    """Interpret a money value the way a form or a sheet hands it over: ``None`` → clear
+    (NULL); a blank string → unset (leave as is); a non-money string → an error, never a
+    silent NULL or $0."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return _UNSET
+    cents = to_cents(value)
+    if cents is None:
+        raise InventoryError(f"{name} must be a money amount (12.50, $1,234.56), got {value!r}")
+    return cents
 
 
 def dollars(cents: int | None) -> float | None:
@@ -156,21 +202,26 @@ def today_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+_PRICE_IN_STATUS_RE = re.compile(r"\(\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*\)|\$\s*(\d[\d,]*(?:\.\d+)?)")
+
+
 def normalize_status(raw) -> tuple[str, int | None]:
-    """Map free-text status ("Pending Sell", "Sold ($5)") to the vocabulary, plus a sold
-    price when the text carries one."""
-    text = (str(raw or "")).strip().lower()
+    """Map free-text status ("Pending Sell", "Sold ($5)", "Planned Split") to the vocabulary,
+    plus a sold price when the text carries one — only a ``$``-prefixed or parenthesised
+    amount counts ("Sold 9/12" is a date, not a $9 sale). Whole words only: "delisted"
+    is not "listed" and "unavailable" is not "available"."""
+    text = str(raw or "").strip().lower()
     if not text:
         return "available", None
-    if text.startswith("sold"):
-        return "sold", to_cents(text[4:])
-    for key in ("pending", "listed", "kept", "withdrawn", "available", "planned"):
-        if key in text:
+    tokens = re.findall(r"[a-z]+", text)
+    if tokens and tokens[0] == "sold":
+        m = _PRICE_IN_STATUS_RE.search(text)
+        return "sold", (to_cents(m.group(1) or m.group(2)) if m else None)
+    for key in ("pending", "listed", "kept", "withdrawn", "planned", "available"):
+        if key in tokens:
             return key, None
-    if text in {"keep", "keeping"}:
+    if tokens and tokens[0] in {"keep", "keeping"}:
         return "kept", None
-    if text in STATUSES:
-        return text, None
     raise InventoryError(f"unknown status {raw!r}; one of {', '.join(STATUSES)}")
 
 
@@ -178,15 +229,29 @@ def new_item_id() -> str:
     return "INV-" + uuid.uuid4().hex[:6].upper()
 
 
-_ITEM_MONEY = {"cost_basis", "target_low", "target", "target_high", "retail"}
-_ITEM_TEXT = {"lot_id", "category", "name", "condition", "notes", "price_basis", "price_updated_on"}
-_ITEM_INT = {"quantity", "model_count"}
-_LOT_TEXT = {"name", "description", "acquired_on", "source", "notes"}
+#: Ids travel in URLs (`/items/{id}`), file names and event payloads: letters, digits and
+#: a few separators, no slashes or whitespace, at most 64 characters.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
+
+
+def check_id(kind: str, value: str) -> str:
+    value = str(value or "").strip()
+    if not _ID_RE.match(value):
+        raise InventoryError(
+            f"{kind} id {value!r} is not usable — letters, digits and . _ : + - only (no spaces or slashes), up to 64 characters"
+        )
+    return value
+
+
+_ITEM_MONEY = ("cost_basis", "target_low", "target", "target_high", "retail")
+_ITEM_TEXT = ("lot_id", "category", "name", "condition", "notes", "price_basis", "price_updated_on")
+_ITEM_INT = ("quantity", "model_count")
+_LOT_TEXT = ("name", "description", "acquired_on", "source", "notes")
 
 
 def _item_row_to_dict(r: sqlite3.Row) -> dict:
     d = dict(r)
-    out = {
+    return {
         "id": d["id"],
         "lot_id": d["lot_id"],
         "category": d["category"],
@@ -206,7 +271,6 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
-    return out
 
 
 def _lot_row_to_dict(r: sqlite3.Row) -> dict:
@@ -235,13 +299,21 @@ def _obs_row_to_dict(r: sqlite3.Row) -> dict:
     return d
 
 
+def _int_field(name: str, value) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError) as exc:
+        raise InventoryError(f"{name} must be a whole number, got {value!r}") from exc
+
+
 class InventoryStore:
-    """All reads and writes go through here. One connection per call; writes serialized."""
+    """All reads and writes go through here. One connection per call, closed; writes are one
+    serialized transaction each."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as con:
+        with self._read() as con:
             con.executescript(SCHEMA)
             for table, column, ddl in _MIGRATIONS:
                 cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
@@ -249,23 +321,46 @@ class InventoryStore:
                     con.execute(ddl)
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        con = sqlite3.connect(self.path, timeout=10, isolation_level=None)  # autocommit; we BEGIN explicitly
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA busy_timeout=10000")  # BEFORE the WAL switch — that transition takes locks
         con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA foreign_keys=ON")
         return con
+
+    @contextlib.contextmanager
+    def _read(self):
+        con = self._connect()
+        try:
+            yield con
+        finally:
+            con.close()
+
+    @contextlib.contextmanager
+    def _tx(self):
+        """One write transaction: BEGIN IMMEDIATE under the process lock, COMMIT on success,
+        ROLLBACK on any exception, always closed."""
+        with _WRITE_LOCK:
+            con = self._connect()
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                yield con
+                con.commit()
+            except BaseException:
+                con.rollback()
+                raise
+            finally:
+                con.close()
 
     # ── audit ─────────────────────────────────────────────────────────────────
     @staticmethod
-    def _audit(con, entity: str, entity_id: str, action: str, actor: str, changes: dict | None = None) -> None:
+    def _audit(con, entity: str, entity_id, action: str, actor: str, changes: dict | None = None) -> None:
         con.execute(
             "INSERT INTO audit(ts, entity, entity_id, action, actor, changes) VALUES (?,?,?,?,?,?)",
             (now_iso(), entity, str(entity_id), action, actor or "", json.dumps(changes or {}, default=str)),
         )
 
     def audit_log(self, limit: int = 100, entity_id: str = "") -> list[dict]:
-        with self._connect() as con:
+        with self._read() as con:
             if entity_id:
                 rows = con.execute(
                     "SELECT * FROM audit WHERE entity_id=? ORDER BY id DESC LIMIT ?", (entity_id, limit)
@@ -285,10 +380,17 @@ class InventoryStore:
         lot_id = str(data.get("id") or "").strip()
         if not lot_id:
             raise InventoryError("a lot needs an id (e.g. BLOODBOWL-2026-09)")
+        lot_id = check_id("lot", lot_id)
         fields = {k: str(data[k]) for k in _LOT_TEXT if k in data and data[k] is not None}
+        if "name" in fields and not fields["name"].strip():
+            raise InventoryError("a lot name cannot be blank")
         if "acquisition_cost" in data:
-            fields["acquisition_cost_cents"] = to_cents(data["acquisition_cost"]) or 0
-        with _WRITE_LOCK, self._connect() as con:
+            cents = money_field("acquisition_cost", data["acquisition_cost"])
+            if cents is None:
+                cents = 0  # an explicit null means "no cost", never a silent default
+            if cents is not _UNSET:
+                fields["acquisition_cost_cents"] = cents
+        with self._tx() as con:
             existing = con.execute("SELECT * FROM lots WHERE id=?", (lot_id,)).fetchone()
             ts = now_iso()
             if existing is None:
@@ -308,18 +410,19 @@ class InventoryStore:
         return _lot_row_to_dict(row)
 
     def get_lot(self, lot_id: str) -> dict | None:
-        with self._connect() as con:
+        with self._read() as con:
             row = con.execute("SELECT * FROM lots WHERE id=?", (lot_id,)).fetchone()
         return _lot_row_to_dict(row) if row else None
 
     def list_lots(self) -> list[dict]:
-        with self._connect() as con:
+        with self._read() as con:
             rows = con.execute("SELECT * FROM lots ORDER BY acquired_on DESC, id").fetchall()
         return [_lot_row_to_dict(r) for r in rows]
 
     def delete_lot(self, lot_id: str, *, actor: str = "", cascade: bool = False) -> int:
-        """Remove a lot. Refuses while items reference it unless ``cascade`` (which removes them too)."""
-        with _WRITE_LOCK, self._connect() as con:
+        """Remove a lot. Refuses while items reference it unless ``cascade`` (which removes them
+        too — every removed row is snapshotted into the audit trail)."""
+        with self._tx() as con:
             n = con.execute("SELECT COUNT(*) FROM items WHERE lot_id=?", (lot_id,)).fetchone()[0]
             if n and not cascade:
                 raise InventoryError(f"lot {lot_id!r} still has {n} item(s); move or delete them first, or cascade")
@@ -327,53 +430,79 @@ class InventoryStore:
                 ids = [r[0] for r in con.execute("SELECT id FROM items WHERE lot_id=?", (lot_id,))]
                 for iid in ids:
                     self._delete_item_rows(con, iid, actor)
+            row = con.execute("SELECT * FROM lots WHERE id=?", (lot_id,)).fetchone()
             cur = con.execute("DELETE FROM lots WHERE id=?", (lot_id,))
             if cur.rowcount:
-                self._audit(con, "lot", lot_id, "delete", actor, {"cascade": cascade, "items": n})
+                self._audit(
+                    con, "lot", lot_id, "delete", actor, {"cascade": cascade, "items": n, "snapshot": dict(row)}
+                )
             return cur.rowcount
 
     # ── items ─────────────────────────────────────────────────────────────────
-    def upsert_item(self, data: dict, *, actor: str = "") -> dict:
-        """Create or update an item. ``id`` optional on create (one is minted)."""
-        item_id = str(data.get("id") or "").strip()
+    @staticmethod
+    def _item_fields(data: dict) -> dict:
+        """Validate + translate the external item dict into column values. Blank money and
+        integer strings are UNSET (left alone), never zero; garbage is an error."""
         fields: dict = {}
         for k in _ITEM_TEXT:
             if k in data and data[k] is not None:
                 fields[k] = str(data[k])
         for k in _ITEM_INT:
-            if k in data and data[k] not in (None, ""):
-                try:
-                    fields[k] = int(float(data[k]))
-                except (TypeError, ValueError) as exc:
-                    raise InventoryError(f"{k} must be a whole number, got {data[k]!r}") from exc
+            if k in data and data[k] is not None and not (isinstance(data[k], str) and not data[k].strip()):
+                fields[k] = _int_field(k, data[k])
         for k in _ITEM_MONEY:
             if k in data:
-                fields[f"{k}_cents"] = to_cents(data[k])
-        if "status" in data and data["status"] is not None:
-            status, _ = normalize_status(data["status"])
+                cents = money_field(k, data[k])
+                if cents is not _UNSET:
+                    fields[f"{k}_cents"] = cents
+        return fields
+
+    def _upsert_item_rows(self, con, data: dict, *, actor: str, allow_sold: bool = False) -> sqlite3.Row:
+        item_id = str(data.get("id") or "").strip()
+        if item_id:
+            item_id = check_id("item", item_id)
+        fields = self._item_fields(data)
+        existing = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone() if item_id else None
+        if existing is not None and "name" in fields and not fields["name"].strip():
+            raise InventoryError("an item name cannot be blank")
+        status_raw = data.get("status")
+        if status_raw is not None and str(status_raw).strip() != "":
+            status, _ = normalize_status(status_raw)
+            if status == "sold" and not allow_sold and (existing is None or existing["status"] != "sold"):
+                raise InventoryError("record a sale with mark_sold — it sets status=sold itself, with the net")
             fields["status"] = status
-        with _WRITE_LOCK, self._connect() as con:
-            existing = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone() if item_id else None
-            ts = now_iso()
-            if existing is None:
-                if not fields.get("name"):
-                    raise InventoryError("a new item needs a name")
-                item_id = item_id or new_item_id()
-                cols = ["id", "created_at", "updated_at", *fields]
-                con.execute(
-                    f"INSERT INTO items({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [item_id, ts, ts, *fields.values()],
+        lot_id = fields.get("lot_id")
+        if lot_id and con.execute("SELECT 1 FROM lots WHERE id=?", (lot_id,)).fetchone() is None:
+            raise InventoryError(f"no lot {lot_id!r}; create it first (or import the lots sheet before the items)")
+        ts = now_iso()
+        if existing is None:
+            if not (fields.get("name") or "").strip():
+                raise InventoryError(
+                    "a new item needs a name" + (f" (no item {item_id!r} exists to update)" if item_id else "")
                 )
-                self._audit(con, "item", item_id, "create", actor, fields)
-            elif fields:
-                sets = ", ".join(f"{k}=?" for k in fields)
-                con.execute(f"UPDATE items SET {sets}, updated_at=? WHERE id=?", [*fields.values(), ts, item_id])
-                self._audit(con, "item", item_id, "update", actor, fields)
-            row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            item_id = item_id or new_item_id()
+            cols = ["id", "created_at", "updated_at", *fields]
+            con.execute(
+                f"INSERT INTO items({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                [item_id, ts, ts, *fields.values()],
+            )
+            self._audit(con, "item", item_id, "create", actor, fields)
+        elif fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            con.execute(f"UPDATE items SET {sets}, updated_at=? WHERE id=?", [*fields.values(), ts, item_id])
+            self._audit(con, "item", item_id, "update", actor, fields)
+        return con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+
+    def upsert_item(self, data: dict, *, actor: str = "", allow_sold: bool = False) -> dict:
+        """Create or update an item. ``id`` optional on create (one is minted). Setting
+        ``status=sold`` directly is refused unless ``allow_sold`` (a sheet import that
+        records the sale itself) — a sale is recorded with :meth:`mark_sold`."""
+        with self._tx() as con:
+            row = self._upsert_item_rows(con, data, actor=actor, allow_sold=allow_sold)
         return _item_row_to_dict(row)
 
     def get_item(self, item_id: str) -> dict | None:
-        with self._connect() as con:
+        with self._read() as con:
             row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
             if row is None:
                 return None
@@ -394,6 +523,16 @@ class InventoryStore:
             ]
         return item
 
+    def find_item(self, *, lot_id: str, name: str) -> dict | None:
+        """The item with this lot + name (case-insensitive) — how a sheet without an id column
+        is matched on re-import instead of minting duplicates."""
+        with self._read() as con:
+            row = con.execute(
+                "SELECT * FROM items WHERE lot_id=? AND lower(name)=lower(?) ORDER BY created_at LIMIT 1",
+                (lot_id or "", name),
+            ).fetchone()
+        return _item_row_to_dict(row) if row else None
+
     def list_items(
         self,
         *,
@@ -409,7 +548,7 @@ class InventoryStore:
             where.append("lot_id=?")
             args.append(lot_id)
         if status:
-            statuses = [s.strip() for s in status.split(",") if s.strip()]
+            statuses = [s.strip().lower() for s in status.split(",") if s.strip()]
             for s in statuses:
                 if s not in STATUSES:
                     raise InventoryError(f"unknown status {s!r}; one of {', '.join(STATUSES)}")
@@ -427,61 +566,71 @@ class InventoryStore:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY lot_id, category, id LIMIT ? OFFSET ?"
         args.extend([max(1, int(limit)), max(0, int(offset))])
-        with self._connect() as con:
+        with self._read() as con:
             rows = con.execute(sql, args).fetchall()
         return [_item_row_to_dict(r) for r in rows]
 
     @staticmethod
     def _delete_item_rows(con, item_id: str, actor: str) -> int:
-        cur = con.execute("DELETE FROM items WHERE id=?", (item_id,))
-        if cur.rowcount:
-            con.execute("DELETE FROM listings WHERE item_id=?", (item_id,))
-            con.execute("DELETE FROM sales WHERE item_id=?", (item_id,))
-            con.execute("DELETE FROM price_observations WHERE item_id=?", (item_id,))
-            InventoryStore._audit(con, "item", item_id, "delete", actor)
-        return cur.rowcount
+        row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            return 0
+        snapshot = {
+            "item": dict(row),
+            "listings": [dict(r) for r in con.execute("SELECT * FROM listings WHERE item_id=?", (item_id,))],
+            "sales": [dict(r) for r in con.execute("SELECT * FROM sales WHERE item_id=?", (item_id,))],
+            "observations": [
+                dict(r) for r in con.execute("SELECT * FROM price_observations WHERE item_id=?", (item_id,))
+            ],
+        }
+        con.execute("DELETE FROM items WHERE id=?", (item_id,))
+        con.execute("DELETE FROM listings WHERE item_id=?", (item_id,))
+        con.execute("DELETE FROM sales WHERE item_id=?", (item_id,))
+        con.execute("DELETE FROM price_observations WHERE item_id=?", (item_id,))
+        InventoryStore._audit(con, "item", item_id, "delete", actor, {"snapshot": snapshot})
+        return 1
 
     def delete_item(self, item_id: str, *, actor: str = "") -> int:
-        with _WRITE_LOCK, self._connect() as con:
+        with self._tx() as con:
             return self._delete_item_rows(con, item_id, actor)
 
     # ── pricing ───────────────────────────────────────────────────────────────
-    def record_observation(
-        self,
-        item_id: str,
-        *,
-        source: str,
-        n: int = 0,
-        p25=None,
-        median=None,
-        p75=None,
-        query: str = "",
-        basis: str = "",
-        observed_on: str = "",
-        notes: str = "",
-    ) -> dict:
+    @staticmethod
+    def _insert_observation(con, item_id: str, *, observed_on: str = "", **obs) -> sqlite3.Row:
+        unknown = set(obs) - set(OBSERVATION_FIELDS)
+        if unknown:
+            raise InventoryError(f"unknown observation field(s): {', '.join(sorted(unknown))}")
+        source = str(obs.get("source") or "")
         if source not in OBSERVATION_SOURCES:
             raise InventoryError(f"unknown source {source!r}; one of {', '.join(OBSERVATION_SOURCES)}")
-        with _WRITE_LOCK, self._connect() as con:
+        n = obs.get("n") or 0
+        try:
+            n = int(n)
+        except (TypeError, ValueError) as exc:
+            raise InventoryError(f"n must be a whole number, got {n!r}") from exc
+        cur = con.execute(
+            "INSERT INTO price_observations(item_id, observed_on, source, query, n, p25_cents, median_cents, "
+            "p75_cents, basis, notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                item_id,
+                observed_on or today_iso(),
+                source,
+                str(obs.get("query") or ""),
+                n,
+                to_cents(obs.get("p25")),
+                to_cents(obs.get("median")),
+                to_cents(obs.get("p75")),
+                str(obs.get("basis") or ""),
+                str(obs.get("notes") or ""),
+            ),
+        )
+        return con.execute("SELECT * FROM price_observations WHERE id=?", (cur.lastrowid,)).fetchone()
+
+    def record_observation(self, item_id: str, *, observed_on: str = "", **obs) -> dict:
+        with self._tx() as con:
             if con.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
                 raise InventoryError(f"no item {item_id!r}")
-            cur = con.execute(
-                "INSERT INTO price_observations(item_id, observed_on, source, query, n, p25_cents, median_cents, "
-                "p75_cents, basis, notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    item_id,
-                    observed_on or today_iso(),
-                    source,
-                    query,
-                    int(n or 0),
-                    to_cents(p25),
-                    to_cents(median),
-                    to_cents(p75),
-                    basis,
-                    notes,
-                ),
-            )
-            row = con.execute("SELECT * FROM price_observations WHERE id=?", (cur.lastrowid,)).fetchone()
+            row = self._insert_observation(con, item_id, observed_on=observed_on, **obs)
         return _obs_row_to_dict(row)
 
     def set_price(
@@ -496,24 +645,30 @@ class InventoryStore:
         actor: str = "",
         observation: dict | None = None,
     ) -> dict:
-        """Set the item's target band with the evidence it rests on. ``observation`` (source,
-        n, p25/median/p75, query) is recorded alongside so the "why" survives."""
+        """Set the item's target band with the evidence it rests on, in ONE transaction: the
+        targets and the observation land together or not at all."""
         if not basis:
             raise InventoryError("a price needs a basis (e.g. 'eBay sold comps (22 sold, incl. shipping)')")
-        item = self.upsert_item(
-            {
-                "id": item_id,
-                "target_low": low,
-                "target": target,
-                "target_high": high,
-                "price_basis": basis,
-                "price_updated_on": observed_on or today_iso(),
-            },
-            actor=actor,
-        )
-        if observation:
-            self.record_observation(item_id, observed_on=observed_on, **observation)
-        return item
+        if observation is not None and not isinstance(observation, dict):
+            raise InventoryError("observation must be an object with source, n, p25, median, p75, query")
+        with self._tx() as con:
+            if con.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+                raise InventoryError(f"no item {item_id!r}")
+            row = self._upsert_item_rows(
+                con,
+                {
+                    "id": item_id,
+                    "target_low": low,
+                    "target": target,
+                    "target_high": high,
+                    "price_basis": basis,
+                    "price_updated_on": observed_on or today_iso(),
+                },
+                actor=actor,
+            )
+            if observation:
+                self._insert_observation(con, item_id, observed_on=observed_on, **observation)
+        return _item_row_to_dict(row)
 
     # ── listings + sales ──────────────────────────────────────────────────────
     def add_listing(
@@ -521,24 +676,28 @@ class InventoryStore:
     ) -> dict:
         if not channel:
             raise InventoryError("a listing needs a channel (eBay, Facebook, local, r/miniswap …)")
-        with _WRITE_LOCK, self._connect() as con:
+        with self._tx() as con:
             row = con.execute("SELECT status FROM items WHERE id=?", (item_id,)).fetchone()
             if row is None:
                 raise InventoryError(f"no item {item_id!r}")
+            if row["status"] in CLOSED:
+                raise InventoryError(f"item {item_id!r} is {row['status']}; set it back to available before listing it")
             cur = con.execute(
                 "INSERT INTO listings(item_id, channel, url, price_cents, listed_on, notes) VALUES (?,?,?,?,?,?)",
                 (item_id, channel, url, to_cents(price), listed_on or today_iso(), notes),
             )
-            if row["status"] == "available":
+            if row["status"] in ("planned", "available"):
                 con.execute("UPDATE items SET status='listed', updated_at=? WHERE id=?", (now_iso(), item_id))
             self._audit(con, "listing", cur.lastrowid, "create", actor, {"item_id": item_id, "channel": channel})
             out = con.execute("SELECT * FROM listings WHERE id=?", (cur.lastrowid,)).fetchone()
         return _listing_row_to_dict(out)
 
     def end_listing(self, listing_id: int, *, state: str = "ended", ended_on: str = "", actor: str = "") -> dict:
+        if state == "sold":
+            raise InventoryError("record the sale with mark_sold — it closes the listing as sold itself")
         if state not in LISTING_STATES:
-            raise InventoryError(f"unknown listing state {state!r}; one of {', '.join(LISTING_STATES)}")
-        with _WRITE_LOCK, self._connect() as con:
+            raise InventoryError(f"unknown listing state {state!r}; one of ended")
+        with self._tx() as con:
             row = con.execute("SELECT * FROM listings WHERE id=?", (listing_id,)).fetchone()
             if row is None:
                 raise InventoryError(f"no listing {listing_id}")
@@ -569,58 +728,81 @@ class InventoryStore:
         quantity: int = 1,
         notes: str = "",
         actor: str = "",
+        force: bool = False,
     ) -> dict:
-        """Record a sale: the sale row, the item → sold, every live listing → sold.
-        ``net = price + shipping charged − fees − shipping cost``."""
-        price_c = to_cents(price)
-        if price_c is None:
+        """Record a sale in one transaction: the sale row, the stock change, the closed
+        listings, the audit row. ``net = price + shipping charged − fees − shipping cost``.
+
+        Selling fewer units than the item holds decrements its quantity and leaves it on
+        sale; selling the last unit flips it to ``sold`` and closes every live listing. An
+        item that is already sold (or kept/withdrawn) is refused unless ``force`` — a retried
+        tool call must not double the realized revenue."""
+        price_c = money_field("price", price)
+        if price_c is None or price_c is _UNSET:
             raise InventoryError("a sale needs a price")
         if not channel:
             raise InventoryError("a sale needs a channel")
+        qty = _int_field("quantity", quantity if quantity not in (None, "") else 1)
+        if qty < 1:
+            raise InventoryError("quantity must be at least 1")
         fees_c, ship_in_c, ship_out_c = (
             to_cents(fees) or 0,
             to_cents(shipping_charged) or 0,
             to_cents(shipping_cost) or 0,
         )
         net_c = price_c + ship_in_c - fees_c - ship_out_c
-        with _WRITE_LOCK, self._connect() as con:
-            if con.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+        with self._tx() as con:
+            row = con.execute("SELECT status, quantity FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
                 raise InventoryError(f"no item {item_id!r}")
+            if row["status"] in CLOSED and not force:
+                prior = con.execute(
+                    "SELECT id, sold_on, price_cents FROM sales WHERE item_id=? ORDER BY id DESC LIMIT 1", (item_id,)
+                ).fetchone()
+                was = (
+                    f" (sale #{prior['id']} on {prior['sold_on']} for {dollars(prior['price_cents'])})" if prior else ""
+                )
+                raise InventoryError(
+                    f"item {item_id!r} is already {row['status']}{was}; pass force=True to record another sale"
+                )
+            remaining = max(0, int(row["quantity"] or 1) - qty)
             cur = con.execute(
                 "INSERT INTO sales(item_id, channel, sold_on, price_cents, shipping_charged_cents, fees_cents, "
                 "shipping_cost_cents, net_cents, quantity, notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    item_id,
-                    channel,
-                    sold_on or today_iso(),
-                    price_c,
-                    ship_in_c,
-                    fees_c,
-                    ship_out_c,
-                    net_c,
-                    int(quantity or 1),
-                    notes,
-                ),
+                (item_id, channel, sold_on or today_iso(), price_c, ship_in_c, fees_c, ship_out_c, net_c, qty, notes),
             )
             ts = now_iso()
-            con.execute("UPDATE items SET status='sold', updated_at=? WHERE id=?", (ts, item_id))
-            con.execute(
-                "UPDATE listings SET state='sold', ended_on=? WHERE item_id=? AND state='active'",
-                (sold_on or today_iso(), item_id),
-            )
+            if remaining > 0:
+                con.execute("UPDATE items SET quantity=?, updated_at=? WHERE id=?", (remaining, ts, item_id))
+            else:
+                con.execute("UPDATE items SET status='sold', updated_at=? WHERE id=?", (ts, item_id))
+                con.execute(
+                    "UPDATE listings SET state='sold', ended_on=? WHERE item_id=? AND state='active'",
+                    (sold_on or today_iso(), item_id),
+                )
             self._audit(
                 con,
                 "sale",
                 cur.lastrowid,
                 "create",
                 actor,
-                {"item_id": item_id, "channel": channel, "price": dollars(price_c), "net": dollars(net_c)},
+                {
+                    "item_id": item_id,
+                    "channel": channel,
+                    "price": dollars(price_c),
+                    "net": dollars(net_c),
+                    "quantity": qty,
+                    "remaining": remaining,
+                },
             )
             out = con.execute("SELECT * FROM sales WHERE id=?", (cur.lastrowid,)).fetchone()
-        return _sale_row_to_dict(out)
+        sale = _sale_row_to_dict(out)
+        sale["remaining_quantity"] = remaining
+        sale["item_status"] = "sold" if remaining == 0 else row["status"]
+        return sale
 
     def list_sales(self, *, lot_id: str = "", limit: int = 500) -> list[dict]:
-        with self._connect() as con:
+        with self._read() as con:
             if lot_id:
                 rows = con.execute(
                     "SELECT s.* FROM sales s JOIN items i ON i.id=s.item_id WHERE i.lot_id=? "
@@ -634,8 +816,10 @@ class InventoryStore:
     # ── roll-ups ──────────────────────────────────────────────────────────────
     def summary(self, lot_id: str = "") -> dict:
         """Per-lot P&L: what it cost, what is left to sell (at low/target/high), what has
-        been realized (gross and net), and where the lot lands if the rest sells at target."""
-        with self._connect() as con:
+        been realized (gross and net), and where the lot lands if the rest sells at target.
+        Items with no lot (or a lot that no longer exists) roll up under ``unassigned`` and
+        count toward the totals — nothing with money on it is left out."""
+        with self._read() as con:
             lots = [_lot_row_to_dict(r) for r in con.execute("SELECT * FROM lots ORDER BY id")]
             if lot_id:
                 lots = [lot for lot in lots if lot["id"] == lot_id]
@@ -643,32 +827,34 @@ class InventoryStore:
                     raise InventoryError(f"no lot {lot_id!r}")
             items = [dict(r) for r in con.execute("SELECT * FROM items")]
             sales = [dict(r) for r in con.execute("SELECT * FROM sales")]
+        known = {lot["id"] for lot in lots}
         by_lot: dict[str, list[dict]] = {}
         for it in items:
             by_lot.setdefault(it["lot_id"], []).append(it)
         sales_by_item: dict[str, list[dict]] = {}
         for s in sales:
             sales_by_item.setdefault(s["item_id"], []).append(s)
-        out_lots = []
-        for lot in lots:
-            lot_items = by_lot.get(lot["id"], [])
-            out_lots.append(self._lot_rollup(lot, lot_items, sales_by_item))
-        orphan_items = by_lot.get("", []) + [
-            it for k, v in by_lot.items() if k and k not in {lot["id"] for lot in lots} for it in v
-        ]
+        out_lots = [self._lot_rollup(lot, by_lot.get(lot["id"], []), sales_by_item) for lot in lots]
+        orphans = [] if lot_id else [it for k, v in by_lot.items() if k not in known for it in v]
+        unassigned = None
+        if orphans:
+            unassigned = self._lot_rollup(
+                {"id": "", "name": "(no lot)", "acquisition_cost": 0.0, "acquired_on": ""}, orphans, sales_by_item
+            )
+        rollups = out_lots + ([unassigned] if unassigned else [])
         totals = {
             "lots": len(out_lots),
-            "items": sum(lr["counts"]["total"] for lr in out_lots),
-            "acquisition_cost": round(sum(lr["acquisition_cost"] for lr in out_lots), 2),
-            "realized_gross": round(sum(lr["realized"]["gross"] for lr in out_lots), 2),
-            "realized_net": round(sum(lr["realized"]["net"] for lr in out_lots), 2),
-            "remaining": {k: round(sum(lr["remaining"][k] for lr in out_lots), 2) for k in ("low", "target", "high")},
-            "unpriced_items": sum(lr["remaining"]["unpriced_items"] for lr in out_lots),
+            "items": sum(lr["counts"]["total"] for lr in rollups),
+            "acquisition_cost": round(sum(lr["acquisition_cost"] for lr in rollups), 2),
+            "realized_gross": round(sum(lr["realized"]["gross"] for lr in rollups), 2),
+            "realized_net": round(sum(lr["realized"]["net"] for lr in rollups), 2),
+            "remaining": {k: round(sum(lr["remaining"][k] for lr in rollups), 2) for k in ("low", "target", "high")},
+            "unpriced_items": sum(lr["remaining"]["unpriced_items"] for lr in rollups),
         }
         totals["projected_net_at_target"] = round(
             totals["realized_net"] + totals["remaining"]["target"] - totals["acquisition_cost"], 2
         )
-        return {"lots": out_lots, "totals": totals, "items_without_lot": len(orphan_items)}
+        return {"lots": out_lots, "unassigned": unassigned, "totals": totals, "items_without_lot": len(orphans)}
 
     @staticmethod
     def _lot_rollup(lot: dict, items: list[dict], sales_by_item: dict) -> dict:
@@ -680,7 +866,7 @@ class InventoryStore:
         rem = {"low": 0, "target": 0, "high": 0}
         unpriced = 0
         for it in unsold:
-            q = max(1, int(it["quantity"] or 1))
+            q = it["quantity"] if it["quantity"] is not None else 1
             if it["target_cents"] is None and it["target_low_cents"] is None and it["target_high_cents"] is None:
                 unpriced += 1
                 continue
@@ -713,10 +899,11 @@ class InventoryStore:
 
     def stale(self, *, listed_days: int = 14, price_days: int = 30) -> dict:
         """What needs attention: listings live longer than ``listed_days``, and unsold items
-        whose price evidence is older than ``price_days`` (or missing)."""
+        whose price evidence is older than ``price_days`` (or missing). Dates are ISO
+        strings (YYYY-MM-DD or YYYY-MM) and compare as text."""
         cutoff_listed = _days_ago(listed_days)
         cutoff_price = _days_ago(price_days)
-        with self._connect() as con:
+        with self._read() as con:
             old_listings = [
                 dict(r)
                 for r in con.execute(
@@ -744,6 +931,4 @@ class InventoryStore:
 
 
 def _days_ago(days: int) -> str:
-    from datetime import timedelta
-
     return (datetime.now(UTC) - timedelta(days=int(days))).strftime("%Y-%m-%d")

@@ -19,7 +19,7 @@ class TestMoney:
 
     def test_no_float_drift(self):
         assert to_cents(0.29) == 29
-        assert to_cents(1.005) == 100 or to_cents(1.005) == 101  # rounding, not truncation
+        assert to_cents(1.005) == 101  # half-up on the decimal text, not float truncation
 
 
 class TestStatus:
@@ -59,7 +59,7 @@ class TestLotsAndItems:
 
     def test_new_item_needs_a_name(self, store):
         with pytest.raises(InventoryError, match="needs a name"):
-            store.upsert_item({"lot_id": "x"}, actor="t")
+            store.upsert_item({"notes": "x"}, actor="t")
 
     def test_update_touches_only_given_fields_and_keeps_money_exact(self, store):
         store.upsert_item({"id": "X", "name": "Thing", "retail": 43.5, "quantity": 2}, actor="t")

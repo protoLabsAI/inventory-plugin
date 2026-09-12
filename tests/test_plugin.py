@@ -15,12 +15,16 @@ def test_version_matches_pyproject():
     assert f'version = "{manifest["version"]}"' in (ROOT / "pyproject.toml").read_text()
 
 
-def test_ships_disabled_and_declares_events():
+def test_ships_disabled_and_declares_emits_the_way_the_host_reads_them():
     manifest = yaml.safe_load((ROOT / "protoagent.plugin.yaml").read_text())
     assert manifest["enabled"] is False
     assert manifest["id"] == "inventory" and manifest["config_section"] == "inventory"
-    assert "inventory.sale.recorded" in manifest["events"]
+    assert "events" not in manifest  # the host reads `emits:` (graph/plugins/manifest.py); `events:` is silently dead
+    topics = {e["topic"] for e in manifest["emits"]}
+    assert "inventory.sale.recorded" in topics and all(t.startswith("inventory.") for t in topics)
+    assert manifest["subscribes"] == []
     assert manifest["config"]["db_path"] == ""
+    assert manifest["min_protoagent_version"] >= "0.148.0"  # sdk.plugin_store first shipped in 0.148
 
 
 def test_skill_is_discoverable():
