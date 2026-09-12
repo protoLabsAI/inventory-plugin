@@ -55,7 +55,7 @@ PAGE = r"""<!doctype html>
 </head><body>
 <div class="wrap">
   <div class="pl-panel-header pl-panel-header--compact">
-    <div><div class="pl-panel-header__kicker">merchantAgent</div><h1 class="pl-panel-header__title">Inventory</h1></div>
+    <div><div class="pl-panel-header__kicker">Source of truth</div><h1 class="pl-panel-header__title">Inventory</h1></div>
     <div class="pl-panel-header__actions">
       <button class="pl-btn pl-btn--sm" id="btn-import">Import CSV</button>
       <button class="pl-btn pl-btn--sm" id="btn-export">Export CSV</button>
