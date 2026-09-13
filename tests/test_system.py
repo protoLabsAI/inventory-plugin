@@ -63,6 +63,9 @@ def test_api_lists_systems_and_filters(registry):
     c.post("/api/plugins/inventory/items", json={"id": "B", "name": "b", "system": "Warhammer 40K"})
     c.post("/api/plugins/inventory/items", json={"id": "C", "name": "c"})
     assert c.get("/api/plugins/inventory/systems").json() == {"systems": ["Blood Bowl", "Warhammer 40K"]}
+    c.put("/api/plugins/inventory/items/A", json={"condition": "NoS"})
+    c.put("/api/plugins/inventory/items/B", json={"condition": "NIB"})
+    assert c.get("/api/plugins/inventory/conditions").json() == {"conditions": ["NIB", "NoS"]}
     assert [
         i["id"] for i in c.get("/api/plugins/inventory/items", params={"system": "Blood Bowl"}).json()["items"]
     ] == ["A"]

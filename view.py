@@ -102,7 +102,9 @@ PAGE = r"""<!doctype html>
 
   const API = "/api/plugins/inventory";
   const STATUSES = ["planned","available","listed","pending","sold","kept","withdrawn"];
-  const state = { tab: "items", lots: [], items: [], itemsById: {}, systems: [], selected: new Set(), summary: null, sales: [], audit: [], filters: { lot: "", status: "", system: "", q: "" } };
+  const state = { tab: "items", lots: [], items: [], itemsById: {}, systems: [], conditions: [], selected: new Set(), summary: null, sales: [], audit: [], filters: { lot: "", status: "", system: "", q: "" } };
+  // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
+  const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const fmt = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -111,25 +113,40 @@ PAGE = r"""<!doctype html>
   // One markdown list line per item: "- Name — Category — $price" (category omitted when blank).
   const mdLine = (it) => "- " + [String(it.name || "").replace(/\s+/g, " ").trim(), String(it.category || "").trim(), fmt(it.target)].filter((x) => x).join(" — ");
   const mdList = (items) => items.map(mdLine).join("\n");
-  // The copied document: "## <game system>" (blank → "Other", last), "### <lot name>" (no lot → "No lot", last),
-  // then one line per item, in the grid's order within each group.
-  function mdDoc(items, lotsById) {
-    const sysKey = (it) => String(it.system || "").trim();
+  // Chat-friendly price: whole dollars without cents ($20), cents only when they matter ($57.69).
+  const chatPrice = (v) => (v === null || v === undefined || v === "" ? "" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, Number.isInteger(Number(v)) ? { maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+  // One line per item, the way it reads in a group chat: "Name (condition) — $price".
+  const chatLine = (it, withCondition = true) => {
+    const cond = withCondition && clean(it.condition) ? " (" + clean(it.condition) + ")" : "";
+    const price = chatPrice(it.target);
+    return clean(it.name) + cond + (price ? " — " + price : "");
+  };
+  // The copied document, shaped like a for-sale post: the game system as a plain header
+  // (blank → "Other", last); "(all <condition>)" under it when every item in the group shares
+  // one condition, otherwise the condition per line; items that are already pending/listed/sold
+  // gathered after a "(Pending)" / "(Listed)" / "(Sold)" marker. No bullets, no lots, no categories.
+  const STATUS_SECTIONS = [["", ["planned", "available", "kept", "withdrawn"]], ["(Listed)", ["listed"]], ["(Pending)", ["pending"]], ["(Sold)", ["sold"]]];
+  function chatDoc(items) {
     const groups = new Map();
-    for (const it of items) { const k = sysKey(it); if (!groups.has(k)) groups.set(k, new Map()); const lots = groups.get(k); const l = it.lot_id || ""; if (!lots.has(l)) lots.set(l, []); lots.get(l).push(it); }
+    for (const it of items) { const k = clean(it.system); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it); }
     const order = (keys) => keys.filter((k) => k).sort((a, b) => a.localeCompare(b)).concat(keys.includes("") ? [""] : []);
-    const out = [];
+    const blocks = [];
     for (const sys of order([...groups.keys()])) {
-      out.push("## " + (sys || "Other"));
-      const lots = groups.get(sys);
-      for (const lid of order([...lots.keys()])) {
-        const lot = lotsById[lid];
-        out.push("### " + (lid ? (lot && lot.name) || lid : "No lot"));
-        out.push(...lots.get(lid).map(mdLine));
-        out.push("");
+      const rows = groups.get(sys);
+      const conds = new Set(rows.map((it) => clean(it.condition).toLowerCase()));
+      const shared = conds.size === 1 && !conds.has("") ? clean(rows[0].condition) : "";
+      const lines = [sys || "Other"];
+      if (shared) lines.push("(all " + shared + ")");
+      for (const [marker, statuses] of STATUS_SECTIONS) {
+        const part = rows.filter((it) => statuses.includes(it.status));
+        if (!part.length) continue;
+        if (marker) lines.push(marker);
+        lines.push(...part.map((it) => chatLine(it, !shared)));
       }
+      blocks.push(lines.join("\n"));
     }
-    return out.join("\n").trim() + "\n";
+    return blocks.join("\n\n") + "\n";
   }
   async function copyText(text) {
     try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* denied in this frame, or no secure context */ }
@@ -208,8 +225,8 @@ PAGE = r"""<!doctype html>
   async function loadCore() {
     const f = state.filters;
     const qs = new URLSearchParams(); if (f.lot) qs.set("lot_id", f.lot); if (f.status) qs.set("status", f.status); if (f.system) qs.set("system", f.system); if (f.q) qs.set("q", f.q);
-    const [lots, summary, items, systems] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString()), api("/systems").catch(() => ({ systems: [] }))]);
-    state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || [];
+    const [lots, summary, items, systems, conditions] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString()), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] }))]);
+    state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     for (const it of state.items) state.itemsById[it.id] = it;
   }
   let inflight = 0;
@@ -234,6 +251,8 @@ PAGE = r"""<!doctype html>
     ssel.innerHTML = '<option value="">All systems</option>' + state.systems.map((s) => '<option value="' + esc(s) + '"' + (s === scur ? " selected" : "") + ">" + esc(s) + "</option>").join("") + (scur && !state.systems.includes(scur) ? '<option value="' + esc(scur) + '" selected>' + esc(scur) + "</option>" : "");
     let dl = document.getElementById("systems-dl"); if (!dl) { dl = document.createElement("datalist"); dl.id = "systems-dl"; document.body.appendChild(dl); }
     dl.innerHTML = state.systems.map((s) => '<option value="' + esc(s) + '">').join("");
+    let cdl = document.getElementById("conditions-dl"); if (!cdl) { cdl = document.createElement("datalist"); cdl.id = "conditions-dl"; document.body.appendChild(cdl); }
+    cdl.innerHTML = [...new Set([...CONDITION_CODES, ...state.conditions])].map((c) => '<option value="' + esc(c) + '">').join("");
     renderStats();
     document.querySelectorAll("#tabs .pl-tab").forEach((b) => b.classList.toggle("pl-tab--active", b.dataset.tab === state.tab));
     const out = $("#out");
@@ -261,7 +280,7 @@ PAGE = r"""<!doctype html>
     const n = state.selected.size; if (!n) return "";
     const visible = state.items.filter((it) => state.selected.has(it.id)).length;
     return '<div class="selbar" id="selbar"><span>' + n + " selected" + (visible !== n ? " (" + visible + " visible)" : "") + "</span>" +
-      '<button class="pl-btn pl-btn--xs pl-btn--primary" id="copy-md">Copy as Markdown</button>' +
+      '<button class="pl-btn pl-btn--xs pl-btn--primary" id="copy-md" title="System header, then Name (condition) — $price; pending/listed items under their own marker">Copy list</button>' +
       '<button class="pl-btn pl-btn--xs pl-btn--ghost" id="sel-clear">Clear</button>' +
       '<span class="pl-kbd">⌘C</span></div>';
   }
@@ -300,10 +319,9 @@ PAGE = r"""<!doctype html>
     for (const id of dropped) { state.selected.delete(id); delete state.itemsById[id]; }
     const items = live.filter((it) => state.selected.has(it.id));
     if (!items.length) { toast("Nothing left to copy — the selected items no longer exist", "warning"); await refresh(); return; }
-    const lotsById = Object.fromEntries(state.lots.map((l) => [l.id, l]));
-    const text = mdDoc(items, lotsById);
+    const text = chatDoc(items);
     const note = dropped.length ? " (" + dropped.length + " no longer exist and were skipped)" : "";
-    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown" + note, dropped.length ? "warning" : "success"); if (dropped.length) await refresh(); return; }
+    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " for chat" + note, dropped.length ? "warning" : "success"); if (dropped.length) await refresh(); return; }
     await dialog({ title: "Copy " + items.length + " items", body: '<label class="pl-field span2"><span class="pl-field__label">The clipboard is blocked in this frame — select all and copy</span><textarea class="pl-field__input copytext" id="copytext" readonly>' + esc(text) + "</textarea></label>", onSubmit: null });
   }
   function renderLots() {
@@ -343,7 +361,7 @@ PAGE = r"""<!doctype html>
       title: item ? "Edit " + item.id : "New item", submit: item ? "Save" : "Add",
       body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
         field("system", "Game system", it.system || "", { placeholder: "Warhammer 40K, Blood Bowl…", list: "systems-dl", hint: "Optional. Lists and copied Markdown group by it." }) +
-        field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "new on sprue, sealed, painted…" }) +
+        field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "NoS, NIB, Sealed, Assembled, Painted…", list: "conditions-dl", hint: "Printed next to the name in a copied list." }) +
         field("status", "Status", it.status, { type: "select", options: STATUSES.filter((s) => s !== "sold" || it.status === "sold") }) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
         field("retail", "Retail ($)", it.retail ?? "", { type: "number", step: "0.01", hint: "The anchor price, not a target." }) + field("cost_basis", "Cost basis ($)", it.cost_basis ?? "", { type: "number", step: "0.01" }) +
@@ -440,6 +458,7 @@ PAGE = r"""<!doctype html>
     const id = span.dataset.id, f = span.dataset.edit, it = itemById(id); if (!it) return;
     const input = document.createElement("input"); input.className = "pl-editable__input"; input.value = it[f] ?? ""; if (f === "quantity") { input.type = "number"; input.step = "1"; input.style.width = "5ch"; }
     if (f === "system") input.setAttribute("list", "systems-dl");
+    if (f === "condition") input.setAttribute("list", "conditions-dl");
     span.replaceWith(input); input.focus(); input.select();
     let done = false;
     const finish = async (save) => {
