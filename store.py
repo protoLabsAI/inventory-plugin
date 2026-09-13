@@ -534,6 +534,12 @@ class InventoryStore:
             rows = con.execute("SELECT DISTINCT system FROM items WHERE system!='' ORDER BY system").fetchall()
         return [r[0] for r in rows]
 
+    def conditions(self) -> list[str]:
+        """The distinct condition labels in use (NoS, NIB, sealed, painted …) for suggestions."""
+        with self._read() as con:
+            rows = con.execute("SELECT DISTINCT condition FROM items WHERE condition!='' ORDER BY condition").fetchall()
+        return [r[0] for r in rows]
+
     def find_item(self, *, lot_id: str, name: str) -> dict | None:
         """The item with this lot + name (case-insensitive) — how a sheet without an id column
         is matched on re-import instead of minting duplicates."""

@@ -40,6 +40,10 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     async def _systems() -> dict:
         return {"systems": store.systems()}
 
+    @r.get("/conditions")
+    async def _conditions() -> dict:
+        return {"conditions": store.conditions()}
+
     @r.put("/lots/{lot_id}")
     async def _put_lot(lot_id: str, body: dict) -> dict:
         try:
