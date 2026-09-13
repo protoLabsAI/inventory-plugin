@@ -109,7 +109,10 @@ def test_the_pure_helpers_under_node():
     probe = (
         "\nconsole.log(JSON.stringify({ neg: fmt(-12.5), pos: fmt(1234.5), nul: fmt(null), zero: fmt(0), sneg: signed(-3), spos: signed(3), snul: signed(null),"
         " esc: esc('<a href=\"x\">&\\'</a>'), field: field('name', 'Name', '\"><img src=x onerror=alert(1)>'), opt: field('lot_id', 'Lot', '', { type: 'select', options: [['\"><b>', 'x</option><script>']] }),"
-        " md: mdList([{ name: 'Reikland  Reavers\\nHuman Team', category: 'Blood Bowl 2016 Split', target: 57.69 }, { name: 'Loose dice', category: '', target: null }, { name: 'Bundle', category: 'Misc', target: 1234.5 }]) }));\n"
+        " md: mdList([{ name: 'Reikland  Reavers\\nHuman Team', category: 'Blood Bowl 2016 Split', target: 57.69 }, { name: 'Loose dice', category: '', target: null }, { name: 'Bundle', category: 'Misc', target: 1234.5 }]),"
+        " doc: mdDoc([{ name: 'Warboss', category: 'Orks', target: 16, system: 'Warhammer 40K', lot_id: 'ARM' }, { name: 'Human Team', category: 'Teams', target: 57.69, system: 'Blood Bowl', lot_id: 'BB' },"
+        " { name: 'Dice', category: '', target: 15, system: 'Blood Bowl', lot_id: 'BB' }, { name: 'Loose', category: 'Misc', target: null, system: '', lot_id: '' }, { name: 'Captain', category: 'Space Marines', target: 20, system: 'Warhammer 40K', lot_id: 'ARM' }],"
+        " { ARM: { id: 'ARM', name: 'Armageddon Box' }, BB: { id: 'BB', name: '' } }) }));\n"
     )
     r = subprocess.run(
         [node, "--input-type=module"], input=harness + module + probe, capture_output=True, text=True, timeout=60

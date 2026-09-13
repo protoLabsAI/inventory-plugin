@@ -60,14 +60,16 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
 
     @tool
     def inventory_list(
-        lot_id: str = "", status: str = "", category: str = "", query: str = "", limit: int = 200
+        lot_id: str = "", status: str = "", category: str = "", system: str = "", query: str = "", limit: int = 200
     ) -> str:
-        """List inventory items with their targets and status. Filter by lot, status (comma-separated: planned,available,listed,pending,sold,kept,withdrawn), category, or a text search over name/notes/id.
+        """List inventory items with their targets and status, ordered by game system, then lot, then category. Filter by lot, status (comma-separated: planned,available,listed,pending,sold,kept,withdrawn), category, game system, or a text search over name/notes/id/category/system.
 
         Prices are in dollars. `price_basis` says what a target rests on — repeat it when you quote one.
         """
         try:
-            items = store.list_items(lot_id=lot_id, status=status, category=category, query=query, limit=limit)
+            items = store.list_items(
+                lot_id=lot_id, status=status, category=category, system=system, query=query, limit=limit
+            )
             return json.dumps({"ok": True, "count": len(items), "items": items})
         except InventoryError as exc:
             return _err(exc)
@@ -116,6 +118,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         name: str = "",
         lot_id: str = "",
         category: str = "",
+        system: str = "",
         condition: str = "",
         quantity: int | None = None,
         model_count: int | None = None,
@@ -124,7 +127,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         retail: float | None = None,
         notes: str = "",
     ) -> str:
-        """Create an item (leave `id` blank to mint one) or update fields on an existing one — only the fields you pass change. Targets/prices are NOT set here: use inventory_set_price so the evidence is recorded with them. Status is one of planned, available, listed, pending, sold, kept, withdrawn (planned = exists once a sealed box is split); to record a sale use inventory_mark_sold instead of setting status=sold."""
+        """Create an item (leave `id` blank to mint one) or update fields on an existing one — only the fields you pass change. `system` is the game system (Warhammer 40K, Blood Bowl, …), optional but worth setting: lists and copied Markdown group by it. Targets/prices are NOT set here: use inventory_set_price so the evidence is recorded with them. Status is one of planned, available, listed, pending, sold, kept, withdrawn (planned = exists once a sealed box is split); to record a sale use inventory_mark_sold instead of setting status=sold."""
         data: dict = {}
         if id:
             data["id"] = id
@@ -132,6 +135,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
             ("name", name),
             ("lot_id", lot_id),
             ("category", category),
+            ("system", system),
             ("condition", condition),
             ("status", status),
             ("notes", notes),
