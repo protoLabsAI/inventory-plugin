@@ -116,37 +116,21 @@ PAGE = r"""<!doctype html>
   // Chat-friendly price: whole dollars without cents ($20), cents only when they matter ($57.69).
   const chatPrice = (v) => (v === null || v === undefined || v === "" ? "" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, Number.isInteger(Number(v)) ? { maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
-  // One line per item, the way it reads in a group chat: "Name (condition) — $price".
-  const chatLine = (it, withCondition = true) => {
-    const cond = withCondition && clean(it.condition) ? " (" + clean(it.condition) + ")" : "";
+  // One line per item, the way it reads in a group chat: "Name NoS — $20" — the condition
+  // inline after the name, then the price. Josh's own post is the spec.
+  const chatLine = (it) => {
+    const cond = clean(it.condition) ? " " + clean(it.condition) : "";
     const price = chatPrice(it.target);
     return clean(it.name) + cond + (price ? " — " + price : "");
   };
   // The copied document, shaped like a for-sale post: the game system as a plain header
-  // (blank → "Other", last); "(all <condition>)" under it when every item in the group shares
-  // one condition, otherwise the condition per line; items that are already pending/listed/sold
-  // gathered after a "(Pending)" / "(Listed)" / "(Sold)" marker. No bullets, no lots, no categories.
-  const STATUS_SECTIONS = [["", ["planned", "available", "kept", "withdrawn"]], ["(Listed)", ["listed"]], ["(Pending)", ["pending"]], ["(Sold)", ["sold"]]];
+  // (blank → "Other", last), then one line per item in the grid's order. No bullets, no lots,
+  // no categories, no status sections.
   function chatDoc(items) {
     const groups = new Map();
     for (const it of items) { const k = clean(it.system); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it); }
     const order = (keys) => keys.filter((k) => k).sort((a, b) => a.localeCompare(b)).concat(keys.includes("") ? [""] : []);
-    const blocks = [];
-    for (const sys of order([...groups.keys()])) {
-      const rows = groups.get(sys);
-      const conds = new Set(rows.map((it) => clean(it.condition).toLowerCase()));
-      const shared = conds.size === 1 && !conds.has("") ? clean(rows[0].condition) : "";
-      const lines = [sys || "Other"];
-      if (shared) lines.push("(all " + shared + ")");
-      for (const [marker, statuses] of STATUS_SECTIONS) {
-        const part = rows.filter((it) => statuses.includes(it.status));
-        if (!part.length) continue;
-        if (marker) lines.push(marker);
-        lines.push(...part.map((it) => chatLine(it, !shared)));
-      }
-      blocks.push(lines.join("\n"));
-    }
-    return blocks.join("\n\n") + "\n";
+    return order([...groups.keys()]).map((sys) => [sys || "Other", ...groups.get(sys).map(chatLine)].join("\n")).join("\n\n") + "\n";
   }
   async function copyText(text) {
     try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* denied in this frame, or no secure context */ }
@@ -280,7 +264,7 @@ PAGE = r"""<!doctype html>
     const n = state.selected.size; if (!n) return "";
     const visible = state.items.filter((it) => state.selected.has(it.id)).length;
     return '<div class="selbar" id="selbar"><span>' + n + " selected" + (visible !== n ? " (" + visible + " visible)" : "") + "</span>" +
-      '<button class="pl-btn pl-btn--xs pl-btn--primary" id="copy-md" title="System header, then Name (condition) — $price; pending/listed items under their own marker">Copy list</button>' +
+      '<button class="pl-btn pl-btn--xs pl-btn--primary" id="copy-md" title="System header, then one line per item: Name NoS — $20">Copy list</button>' +
       '<button class="pl-btn pl-btn--xs pl-btn--ghost" id="sel-clear">Clear</button>' +
       '<span class="pl-kbd">⌘C</span></div>';
   }
@@ -361,7 +345,7 @@ PAGE = r"""<!doctype html>
       title: item ? "Edit " + item.id : "New item", submit: item ? "Save" : "Add",
       body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
         field("system", "Game system", it.system || "", { placeholder: "Warhammer 40K, Blood Bowl…", list: "systems-dl", hint: "Optional. Lists and copied Markdown group by it." }) +
-        field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "NoS, NIB, Sealed, Assembled, Painted…", list: "conditions-dl", hint: "Printed next to the name in a copied list." }) +
+        field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "NoS, NIB, Sealed, Assembled, Painted…", list: "conditions-dl", hint: "Printed inline after the name in a copied list." }) +
         field("status", "Status", it.status, { type: "select", options: STATUSES.filter((s) => s !== "sold" || it.status === "sold") }) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
         field("retail", "Retail ($)", it.retail ?? "", { type: "number", step: "0.01", hint: "The anchor price, not a target." }) + field("cost_basis", "Cost basis ($)", it.cost_basis ?? "", { type: "number", step: "0.01" }) +
