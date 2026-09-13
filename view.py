@@ -44,6 +44,10 @@ PAGE = r"""<!doctype html>
   .basis{max-width:28ch;overflow:hidden;text-overflow:ellipsis}
   .pl-toast-stack{bottom:var(--pl-space-4);right:var(--pl-space-4)}
   .kicker{font-family:var(--pl-font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--pl-color-fg-muted)}
+  .pl-table td.sel,.pl-table th.sel{width:28px;padding-right:0}
+  .selbar{display:flex;align-items:center;gap:var(--pl-space-2);padding:var(--pl-space-2) 0;font-size:12px;color:var(--pl-color-fg-muted)}
+  .selbar .pl-kbd{font-family:var(--pl-font-mono);font-size:11px;padding:1px 5px;border:var(--pl-border-width) solid var(--pl-color-border);border-radius:4px}
+  textarea.copytext{width:100%;min-height:160px;font-family:var(--pl-font-mono);font-size:12px}
   @media (max-width:640px){.form{grid-template-columns:1fr}.bar .pl-input,.bar .pl-select{min-width:100px}}
 </style>
 <script>
@@ -97,12 +101,22 @@ PAGE = r"""<!doctype html>
 
   const API = "/api/plugins/inventory";
   const STATUSES = ["planned","available","listed","pending","sold","kept","withdrawn"];
-  const state = { tab: "items", lots: [], items: [], summary: null, sales: [], audit: [], filters: { lot: "", status: "", q: "" } };
+  const state = { tab: "items", lots: [], items: [], itemsById: {}, selected: new Set(), summary: null, sales: [], audit: [], filters: { lot: "", status: "", q: "" } };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const fmt = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const signed = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) >= 0 ? "+" : "") + fmt(v));
   const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  // One markdown list line per item: "- Name — Category — $price" (category omitted when blank).
+  const mdLine = (it) => "- " + [String(it.name || "").replace(/\s+/g, " ").trim(), String(it.category || "").trim(), fmt(it.target)].filter((x) => x).join(" — ");
+  const mdList = (items) => items.map(mdLine).join("\n");
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* denied in this frame, or no secure context */ }
+    try {
+      const ta = document.createElement("textarea"); ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove(); return ok;
+    } catch (e) { return false; }
+  }
 
   // RULES 2+3 — every data call goes through the kit's slug-aware, bearer-carrying fetch with a bare path.
   async function api(path, method = "GET", body) {
@@ -164,6 +178,7 @@ PAGE = r"""<!doctype html>
         finally { if (ok) { ok.disabled = false; ok.classList.remove("pl-btn--loading"); } }
       });
       const first = form.querySelector("input:not([readonly]),select,textarea"); (first || root.querySelector(".pl-dialog")).focus();
+      if (first && first.tagName === "TEXTAREA" && first.readOnly) first.select();
     });
   }
   const confirm = (title, text, submit = "Confirm") => dialog({ title, body: '<div class="span2">' + esc(text) + "</div>", submit, danger: true, onSubmit: async () => true });
@@ -174,6 +189,7 @@ PAGE = r"""<!doctype html>
     const qs = new URLSearchParams(); if (f.lot) qs.set("lot_id", f.lot); if (f.status) qs.set("status", f.status); if (f.q) qs.set("q", f.q);
     const [lots, summary, items] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString())]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items;
+    for (const it of state.items) state.itemsById[it.id] = it;
   }
   let inflight = 0;
   async function refresh() {
@@ -215,12 +231,23 @@ PAGE = r"""<!doctype html>
       tile(signed(t.projected_net_at_target), "Projected net at target", "if the rest sells at target") +
       tile(String(t.items), "Items", t.unpriced_items ? t.unpriced_items + " unpriced" : "all priced");
   }
+  function selectedItems() { return [...state.selected].map((id) => state.itemsById[id]).filter(Boolean); }
+  function renderSelBar() {
+    const n = state.selected.size; if (!n) return "";
+    const visible = state.items.filter((it) => state.selected.has(it.id)).length;
+    return '<div class="selbar" id="selbar"><span>' + n + " selected" + (visible !== n ? " (" + visible + " visible)" : "") + "</span>" +
+      '<button class="pl-btn pl-btn--xs pl-btn--primary" id="copy-md">Copy as Markdown</button>' +
+      '<button class="pl-btn pl-btn--xs pl-btn--ghost" id="sel-clear">Clear</button>' +
+      '<span class="pl-kbd">⌘C</span></div>';
+  }
   function renderItems() {
-    if (!state.items.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No items</div><div class="pl-empty__desc">Add one, or import a CSV — headers like inventory_id, item, lot_id, target_price_usd, status are recognised.</div></div>';
+    if (!state.items.length) return renderSelBar() + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No items</div><div class="pl-empty__desc">Add one, or import a CSV — headers like inventory_id, item, lot_id, target_price_usd, status are recognised.</div></div>';
+    const allVisible = state.items.length > 0 && state.items.every((it) => state.selected.has(it.id));
     const rows = state.items.map((it) => {
       const ed = (f, v, cls = "") => '<span class="edit ' + cls + '" data-edit="' + f + '" data-id="' + esc(it.id) + '" title="Double-click to edit">' + (v === "" || v === null ? '<span class="muted">—</span>' : esc(v)) + "</span>";
       const pr = (f, v) => '<td class="num price" data-price="' + esc(it.id) + '" title="Click to set the price band">' + fmt(v) + "</td>";
-      return "<tr>" +
+      return "<tr" + (state.selected.has(it.id) ? ' class="pl-tr--selected"' : "") + ">" +
+        '<td class="sel"><input type="checkbox" data-sel="' + esc(it.id) + '"' + (state.selected.has(it.id) ? " checked" : "") + ' aria-label="Select ' + esc(it.name) + '"></td>' +
         '<td class="muted">' + esc(it.id) + "</td>" +
         '<td class="wrap-cell">' + ed("name", it.name) + '<span class="sub">' + ed("category", it.category) + " · " + ed("condition", it.condition) + "</span></td>" +
         '<td class="num">' + ed("quantity", it.quantity) + "</td>" +
@@ -235,7 +262,13 @@ PAGE = r"""<!doctype html>
           '<button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="del" data-id="' + esc(it.id) + '" aria-label="Delete">✕</button>' +
         "</td></tr>";
     }).join("");
-    return '<table class="pl-table"><thead><tr><th>ID</th><th>Item</th><th class="num">Qty</th><th>Status</th><th class="num">Low</th><th class="num">Target</th><th class="num">High</th><th>Basis</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
+    return renderSelBar() + '<table class="pl-table"><thead><tr><th class="sel"><input type="checkbox" id="sel-all" aria-label="Select all visible"' + (allVisible ? " checked" : "") + '></th><th>ID</th><th>Item</th><th class="num">Qty</th><th>Status</th><th class="num">Low</th><th class="num">Target</th><th class="num">High</th><th>Basis</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
+  }
+  async function copySelected() {
+    const items = selectedItems(); if (!items.length) return;
+    const text = mdList(items);
+    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown", "success"); return; }
+    await dialog({ title: "Copy " + items.length + " items", body: '<label class="pl-field span2"><span class="pl-field__label">The clipboard is blocked in this frame — select all and copy</span><textarea class="pl-field__input copytext" id="copytext" readonly>' + esc(text) + "</textarea></label>", onSubmit: null });
   }
   function renderLots() {
     const s = state.summary; if (!s || !s.lots.length) return '<div class="pl-empty">No lots yet.</div>';
@@ -384,6 +417,10 @@ PAGE = r"""<!doctype html>
   }
   function wireTable() {
     const out = $("#out");
+    out.querySelectorAll("[data-sel]").forEach((cb) => cb.addEventListener("change", () => { if (cb.checked) state.selected.add(cb.dataset.sel); else state.selected.delete(cb.dataset.sel); render(); }));
+    const all = $("#sel-all", out); if (all) all.addEventListener("change", () => { for (const it of state.items) { if (all.checked) state.selected.add(it.id); else state.selected.delete(it.id); } render(); });
+    const copy = $("#copy-md", out); if (copy) copy.addEventListener("click", copySelected);
+    const clear = $("#sel-clear", out); if (clear) clear.addEventListener("click", () => { state.selected.clear(); render(); });
     out.querySelectorAll("[data-edit]").forEach((s) => s.addEventListener("dblclick", () => inlineEdit(s)));
     out.querySelectorAll("[data-price]").forEach((td) => td.addEventListener("click", () => priceDialog(td.dataset.price)));
     out.querySelectorAll("[data-status]").forEach((sel) => sel.addEventListener("change", async () => {
@@ -414,6 +451,12 @@ PAGE = r"""<!doctype html>
   $("#f-status").addEventListener("change", (e) => { state.filters.status = e.target.value; refresh(); });
   let qt; $("#f-q").addEventListener("input", (e) => { clearTimeout(qt); qt = setTimeout(() => { state.filters.q = e.target.value.trim(); refresh(); }, 250); });
   $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (!b) return; state.tab = b.dataset.tab; refresh(); });
+  document.addEventListener("keydown", (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "c" || !state.selected.size) return;
+    const el = document.activeElement; if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+    if (String(window.getSelection && window.getSelection()).length) return;  // a real text selection wins
+    e.preventDefault(); copySelected();
+  });
 
   // Boot once, on whichever fires first: the kit's protoagent:init handshake (bearer + theme) or a short timer.
   let booted = false;

@@ -108,7 +108,8 @@ def test_the_pure_helpers_under_node():
     )
     probe = (
         "\nconsole.log(JSON.stringify({ neg: fmt(-12.5), pos: fmt(1234.5), nul: fmt(null), zero: fmt(0), sneg: signed(-3), spos: signed(3), snul: signed(null),"
-        " esc: esc('<a href=\"x\">&\\'</a>'), field: field('name', 'Name', '\"><img src=x onerror=alert(1)>'), opt: field('lot_id', 'Lot', '', { type: 'select', options: [['\"><b>', 'x</option><script>']] }) }));\n"
+        " esc: esc('<a href=\"x\">&\\'</a>'), field: field('name', 'Name', '\"><img src=x onerror=alert(1)>'), opt: field('lot_id', 'Lot', '', { type: 'select', options: [['\"><b>', 'x</option><script>']] }),"
+        " md: mdList([{ name: 'Reikland  Reavers\\nHuman Team', category: 'Blood Bowl 2016 Split', target: 57.69 }, { name: 'Loose dice', category: '', target: null }, { name: 'Bundle', category: 'Misc', target: 1234.5 }]) }));\n"
     )
     r = subprocess.run(
         [node, "--input-type=module"], input=harness + module + probe, capture_output=True, text=True, timeout=60
@@ -120,3 +121,21 @@ def test_the_pure_helpers_under_node():
     assert out["esc"] == "&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;"
     assert "<img" not in out["field"] and "&quot;&gt;&lt;img" in out["field"]
     assert "<b>" not in out["opt"] and "<script>" not in out["opt"]
+    assert (
+        out["md"]
+        == "- Reikland Reavers Human Team — Blood Bowl 2016 Split — $57.69\n- Loose dice — —\n- Bundle — Misc — $1,234.50"
+    )
+
+
+def test_the_page_has_multiselect_and_copy():
+    from inventory_plugin.view import PAGE
+
+    for needle in (
+        'id="sel-all"',
+        'data-sel="',
+        'id="copy-md"',
+        "navigator.clipboard.writeText",
+        'execCommand("copy")',
+        "copySelected()",
+    ):
+        assert needle in PAGE, needle
