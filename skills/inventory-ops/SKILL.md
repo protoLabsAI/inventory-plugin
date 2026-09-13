@@ -11,7 +11,9 @@ not a note. If a number is not in the inventory, it has not been decided.
 ## Shape
 
 - **Lot** — a purchase. Cost, date, source. P&L is computed against the lot cost.
-- **Item** — one sellable thing from a lot (a team, a dice set, a rulebook). Has a status:
+- **Item** — one sellable thing from a lot (a team, a dice set, a rulebook), optionally tagged
+  with its game `system` (Warhammer 40K, Blood Bowl, …) — set it; lists and copied Markdown
+  group by it. Has a status:
   `planned` (exists once a sealed box is split) → `available` → `listed` → `pending` →
   `sold`, or `kept` / `withdrawn`.
 - **Targets** — low / target / high in dollars, ALWAYS with a `price_basis` string and a

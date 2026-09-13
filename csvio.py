@@ -23,6 +23,7 @@ ITEM_ALIASES: dict[str, tuple[str, ...]] = {
     "id": ("inventory_id", "id", "sku", "item_id"),
     "lot_id": ("lot_id", "lot"),
     "category": ("category", "group", "type"),
+    "system": ("system", "game_system", "game"),
     "name": ("item", "name", "title", "item_name"),
     "condition": ("condition", "cond"),
     "quantity": ("unit_quantity", "quantity", "qty"),
@@ -90,6 +91,7 @@ _STICKY = {"listed", "pending", "sold"}
 ITEM_EXPORT_COLUMNS = (
     "id",
     "lot_id",
+    "system",
     "category",
     "name",
     "condition",

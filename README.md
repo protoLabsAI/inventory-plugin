@@ -15,7 +15,7 @@ inventory_summary()
 | | |
 |---|---|
 | **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_reprice_plan` · `inventory_stale` |
-| **View** | a rail panel: the item grid (double-click to edit name/category/condition/qty; status select; click a price for the Price dialog), Price / Sold / Listing / Edit / Delete per row, multi-select with **Copy as Markdown** (`- Name — Category — $price`, also ⌘C), lots with their P&L, sales, an activity log, CSV import (file or paste, with the mapping report) and export |
+| **View** | a rail panel: the item grid (double-click to edit name/category/condition/qty; status select; click a price for the Price dialog), Price / Sold / Listing / Edit / Delete per row, an optional **game system** per item (filter, ordering, inline edit with suggestions), multi-select with **Copy as Markdown** grouped `## system` → `### lot` → `- Name — Category — $price` (also ⌘C), lots with their P&L, sales, an activity log, CSV import (file or paste, with the mapping report) and export |
 | **API** | bearer-gated JSON under `/api/plugins/inventory` — `summary`, `lots`, `items`, `items/{id}/price`, `items/{id}/sold`, `items/{id}/listings`, `listings/{id}/end`, `sales`, `stale`, `audit`, `import`, `export` |
 | **Automations** | `weekly_review: true` arms a plugin-owned recurring turn (`weekly_review_cron`, default Monday 09:00 in `review_timezone`) that re-prices stale evidence from eBay sold comps through the same tools, reports stale listings with a recommendation (it never changes a listing itself), and posts the per-lot P&L. Cancelled when the plugin is disabled. |
 | **Events** | `inventory.item.changed`, `inventory.lot.changed`, `inventory.sale.recorded`, `inventory.imported` |
@@ -24,7 +24,7 @@ inventory_summary()
 ## The model
 
 - **Lot** — a purchase: cost, date, source. P&L is against the lot cost.
-- **Item** — one sellable thing from a lot. Status `planned → available → listed → pending → sold`, or `kept` / `withdrawn` (`planned` = a piece that exists once a sealed box is split).
+- **Item** — one sellable thing from a lot, optionally tagged with its game **system** (Warhammer 40K, Blood Bowl, …). Status `planned → available → listed → pending → sold`, or `kept` / `withdrawn` (`planned` = a piece that exists once a sealed box is split).
   Targets low/target/high **with a `price_basis` and a date**.
 - **Price observation** — the comps behind a target (source, n, p25/median/p75, query). Recorded by `inventory_set_price`.
 - **Listing** — where the item is up (channel, url, price).

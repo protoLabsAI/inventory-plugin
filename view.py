@@ -69,6 +69,7 @@ PAGE = r"""<!doctype html>
   </div>
   <div class="bar">
     <select class="pl-select" id="f-lot"><option value="">All lots</option></select>
+    <select class="pl-select" id="f-system"><option value="">All systems</option></select>
     <select class="pl-select" id="f-status">
       <option value="">Any status</option>
       <option value="planned,available,listed,pending">Unsold</option>
@@ -101,7 +102,7 @@ PAGE = r"""<!doctype html>
 
   const API = "/api/plugins/inventory";
   const STATUSES = ["planned","available","listed","pending","sold","kept","withdrawn"];
-  const state = { tab: "items", lots: [], items: [], itemsById: {}, selected: new Set(), summary: null, sales: [], audit: [], filters: { lot: "", status: "", q: "" } };
+  const state = { tab: "items", lots: [], items: [], itemsById: {}, systems: [], selected: new Set(), summary: null, sales: [], audit: [], filters: { lot: "", status: "", system: "", q: "" } };
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const fmt = (v) => (v === null || v === undefined || v === "" ? "—" : (Number(v) < 0 ? "-" : "") + "$" + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -110,6 +111,26 @@ PAGE = r"""<!doctype html>
   // One markdown list line per item: "- Name — Category — $price" (category omitted when blank).
   const mdLine = (it) => "- " + [String(it.name || "").replace(/\s+/g, " ").trim(), String(it.category || "").trim(), fmt(it.target)].filter((x) => x).join(" — ");
   const mdList = (items) => items.map(mdLine).join("\n");
+  // The copied document: "## <game system>" (blank → "Other", last), "### <lot name>" (no lot → "No lot", last),
+  // then one line per item, in the grid's order within each group.
+  function mdDoc(items, lotsById) {
+    const sysKey = (it) => String(it.system || "").trim();
+    const groups = new Map();
+    for (const it of items) { const k = sysKey(it); if (!groups.has(k)) groups.set(k, new Map()); const lots = groups.get(k); const l = it.lot_id || ""; if (!lots.has(l)) lots.set(l, []); lots.get(l).push(it); }
+    const order = (keys) => keys.filter((k) => k).sort((a, b) => a.localeCompare(b)).concat(keys.includes("") ? [""] : []);
+    const out = [];
+    for (const sys of order([...groups.keys()])) {
+      out.push("## " + (sys || "Other"));
+      const lots = groups.get(sys);
+      for (const lid of order([...lots.keys()])) {
+        const lot = lotsById[lid];
+        out.push("### " + (lid ? (lot && lot.name) || lid : "No lot"));
+        out.push(...lots.get(lid).map(mdLine));
+        out.push("");
+      }
+    }
+    return out.join("\n").trim() + "\n";
+  }
   async function copyText(text) {
     try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* denied in this frame, or no secure context */ }
     try {
@@ -150,7 +171,7 @@ PAGE = r"""<!doctype html>
       input = '<textarea class="pl-field__input" id="' + id + '" name="' + name + '" placeholder="' + esc(opts.placeholder || "") + '">' + esc(value) + "</textarea>";
     } else {
       input = '<input class="pl-field__input" id="' + id + '" name="' + name + '" type="' + (opts.type || "text") + '" value="' + esc(value) + '"' +
-        (opts.step ? ' step="' + opts.step + '"' : "") + (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.required ? " required" : "") + (opts.readonly ? " readonly" : "") + ">";
+        (opts.step ? ' step="' + opts.step + '"' : "") + (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.list ? ' list="' + esc(opts.list) + '"' : "") + (opts.required ? " required" : "") + (opts.readonly ? " readonly" : "") + ">";
     }
     return '<label class="pl-field' + (opts.span2 ? " span2" : "") + '"><span class="pl-field__label">' + esc(label) + "</span>" + input +
       (opts.hint ? '<span class="pl-field__hint">' + esc(opts.hint) + "</span>" : "") + "</label>";
@@ -186,9 +207,9 @@ PAGE = r"""<!doctype html>
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
     const f = state.filters;
-    const qs = new URLSearchParams(); if (f.lot) qs.set("lot_id", f.lot); if (f.status) qs.set("status", f.status); if (f.q) qs.set("q", f.q);
-    const [lots, summary, items] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString())]);
-    state.lots = lots.lots; state.summary = summary; state.items = items.items;
+    const qs = new URLSearchParams(); if (f.lot) qs.set("lot_id", f.lot); if (f.status) qs.set("status", f.status); if (f.system) qs.set("system", f.system); if (f.q) qs.set("q", f.q);
+    const [lots, summary, items, systems] = await Promise.all([api("/lots"), api("/summary"), api("/items?" + qs.toString()), api("/systems").catch(() => ({ systems: [] }))]);
+    state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || [];
     for (const it of state.items) state.itemsById[it.id] = it;
   }
   let inflight = 0;
@@ -209,6 +230,10 @@ PAGE = r"""<!doctype html>
     if (state.filters.lot && !state.lots.some((l) => l.id === state.filters.lot)) state.filters.lot = "";  // the lot is gone
     const sel = $("#f-lot"); const cur = state.filters.lot;
     sel.innerHTML = '<option value="">All lots</option>' + state.lots.map((l) => '<option value="' + esc(l.id) + '"' + (l.id === cur ? " selected" : "") + ">" + esc(l.name || l.id) + "</option>").join("");
+    const ssel = $("#f-system"); const scur = state.filters.system;
+    ssel.innerHTML = '<option value="">All systems</option>' + state.systems.map((s) => '<option value="' + esc(s) + '"' + (s === scur ? " selected" : "") + ">" + esc(s) + "</option>").join("") + (scur && !state.systems.includes(scur) ? '<option value="' + esc(scur) + '" selected>' + esc(scur) + "</option>" : "");
+    let dl = document.getElementById("systems-dl"); if (!dl) { dl = document.createElement("datalist"); dl.id = "systems-dl"; document.body.appendChild(dl); }
+    dl.innerHTML = state.systems.map((s) => '<option value="' + esc(s) + '">').join("");
     renderStats();
     document.querySelectorAll("#tabs .pl-tab").forEach((b) => b.classList.toggle("pl-tab--active", b.dataset.tab === state.tab));
     const out = $("#out");
@@ -250,6 +275,7 @@ PAGE = r"""<!doctype html>
         '<td class="sel"><input type="checkbox" data-sel="' + esc(it.id) + '"' + (state.selected.has(it.id) ? " checked" : "") + ' aria-label="Select ' + esc(it.name) + '"></td>' +
         '<td class="muted">' + esc(it.id) + "</td>" +
         '<td class="wrap-cell">' + ed("name", it.name) + '<span class="sub">' + ed("category", it.category) + " · " + ed("condition", it.condition) + "</span></td>" +
+        '<td class="wrap-cell">' + ed("system", it.system) + "</td>" +
         '<td class="num">' + ed("quantity", it.quantity) + "</td>" +
         '<td><select class="pl-select status" data-status="' + esc(it.id) + '">' + STATUSES.map((s) => '<option' + (s === it.status ? " selected" : "") + ">" + s + "</option>").join("") + "</select></td>" +
         pr("target_low", it.target_low) + pr("target", it.target) + pr("target_high", it.target_high) +
@@ -262,12 +288,22 @@ PAGE = r"""<!doctype html>
           '<button class="pl-btn pl-btn--xs pl-btn--ghost" data-act="del" data-id="' + esc(it.id) + '" aria-label="Delete">✕</button>' +
         "</td></tr>";
     }).join("");
-    return renderSelBar() + '<table class="pl-table"><thead><tr><th class="sel"><input type="checkbox" id="sel-all" aria-label="Select all visible"' + (allVisible ? " checked" : "") + '></th><th>ID</th><th>Item</th><th class="num">Qty</th><th>Status</th><th class="num">Low</th><th class="num">Target</th><th class="num">High</th><th>Basis</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
+    return renderSelBar() + '<table class="pl-table"><thead><tr><th class="sel"><input type="checkbox" id="sel-all" aria-label="Select all visible"' + (allVisible ? " checked" : "") + '></th><th>ID</th><th>Item</th><th>System</th><th class="num">Qty</th><th>Status</th><th class="num">Low</th><th class="num">Target</th><th class="num">High</th><th>Basis</th><th></th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
   async function copySelected() {
-    const items = selectedItems(); if (!items.length) return;
-    const text = mdList(items);
-    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown", "success"); return; }
+    if (!state.selected.size) return;
+    // Re-read from the server rather than trusting the cache: an item deleted or re-priced
+    // by the agent since the grid loaded must not leak stale into the copied text.
+    let live; try { live = (await api("/items?limit=5000")).items; } catch (e) { toast(e.message, "error"); return; }
+    const byId = Object.fromEntries(live.map((it) => [it.id, it]));
+    const dropped = [...state.selected].filter((id) => !byId[id]);
+    for (const id of dropped) { state.selected.delete(id); delete state.itemsById[id]; }
+    const items = live.filter((it) => state.selected.has(it.id));
+    if (!items.length) { toast("Nothing left to copy — the selected items no longer exist", "warning"); await refresh(); return; }
+    const lotsById = Object.fromEntries(state.lots.map((l) => [l.id, l]));
+    const text = mdDoc(items, lotsById);
+    const note = dropped.length ? " (" + dropped.length + " no longer exist and were skipped)" : "";
+    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown" + note, dropped.length ? "warning" : "success"); if (dropped.length) await refresh(); return; }
     await dialog({ title: "Copy " + items.length + " items", body: '<label class="pl-field span2"><span class="pl-field__label">The clipboard is blocked in this frame — select all and copy</span><textarea class="pl-field__input copytext" id="copytext" readonly>' + esc(text) + "</textarea></label>", onSubmit: null });
   }
   function renderLots() {
@@ -306,6 +342,7 @@ PAGE = r"""<!doctype html>
     await dialog({
       title: item ? "Edit " + item.id : "New item", submit: item ? "Save" : "Add",
       body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
+        field("system", "Game system", it.system || "", { placeholder: "Warhammer 40K, Blood Bowl…", list: "systems-dl", hint: "Optional. Lists and copied Markdown group by it." }) +
         field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "new on sprue, sealed, painted…" }) +
         field("status", "Status", it.status, { type: "select", options: STATUSES.filter((s) => s !== "sold" || it.status === "sold") }) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
@@ -313,7 +350,7 @@ PAGE = r"""<!doctype html>
         field("notes", "Notes", it.notes, { type: "textarea", span2: true }),
       onSubmit: async (v) => {
         if (!v.name.trim()) throw new Error("A name is required");
-        const body = { name: v.name, lot_id: v.lot_id, category: v.category, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
+        const body = { name: v.name, lot_id: v.lot_id, category: v.category, system: v.system, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
         if (!item || v.status !== item.status) body.status = v.status;  // an unchanged "sold" would be refused by the API
         if (item) await api("/items/" + encodeURIComponent(item.id), "PUT", body); else await api("/items", "POST", body);
         toast(item ? "Saved" : "Item added", "success"); await refresh();
@@ -402,6 +439,7 @@ PAGE = r"""<!doctype html>
   async function inlineEdit(span) {
     const id = span.dataset.id, f = span.dataset.edit, it = itemById(id); if (!it) return;
     const input = document.createElement("input"); input.className = "pl-editable__input"; input.value = it[f] ?? ""; if (f === "quantity") { input.type = "number"; input.step = "1"; input.style.width = "5ch"; }
+    if (f === "system") input.setAttribute("list", "systems-dl");
     span.replaceWith(input); input.focus(); input.select();
     let done = false;
     const finish = async (save) => {
@@ -436,7 +474,7 @@ PAGE = r"""<!doctype html>
       if (act === "sold") return soldDialog(id);
       if (act === "list") return listingDialog(id);
       if (act === "edit") { const full = (await api("/items/" + encodeURIComponent(id))).item; return itemDialog(full); }
-      if (act === "del") { const it = itemById(id); if (await confirm("Delete " + id + "?", "\"" + (it && it.name) + "\" and its listings, sales and price history are removed permanently. Prefer status = withdrawn or kept to keep the record.", "Delete")) { try { await api("/items/" + encodeURIComponent(id), "DELETE"); toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
+      if (act === "del") { const it = itemById(id); if (await confirm("Delete " + id + "?", "\"" + (it && it.name) + "\" and its listings, sales and price history are removed permanently. Prefer status = withdrawn or kept to keep the record.", "Delete")) { try { await api("/items/" + encodeURIComponent(id), "DELETE"); state.selected.delete(id); delete state.itemsById[id]; toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
       if (act === "editlot") { const lot = state.lots.find((l) => l.id === id); return lotDialog(lot); }
       if (act === "dellot") { if (await confirm("Delete lot " + id + "?", "Only an empty lot can be deleted. Items keep their history.", "Delete")) { try { await api("/lots/" + encodeURIComponent(id), "DELETE"); if (state.filters.lot === id) state.filters.lot = ""; toast("Lot deleted", "success"); } catch (e) { toast(e.message, "error"); } await refresh(); } }
     }));
@@ -449,6 +487,7 @@ PAGE = r"""<!doctype html>
   $("#btn-export").addEventListener("click", exportCsv);
   $("#f-lot").addEventListener("change", (e) => { state.filters.lot = e.target.value; refresh(); });
   $("#f-status").addEventListener("change", (e) => { state.filters.status = e.target.value; refresh(); });
+  $("#f-system").addEventListener("change", (e) => { state.filters.system = e.target.value; refresh(); });
   let qt; $("#f-q").addEventListener("input", (e) => { clearTimeout(qt); qt = setTimeout(() => { state.filters.q = e.target.value.trim(); refresh(); }, 250); });
   $("#tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (!b) return; state.tab = b.dataset.tab; refresh(); });
   document.addEventListener("keydown", (e) => {

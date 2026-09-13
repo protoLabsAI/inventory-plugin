@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS items (
   id TEXT PRIMARY KEY,
   lot_id TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL DEFAULT '',
+  system TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   condition TEXT NOT NULL DEFAULT '',
   quantity INTEGER NOT NULL DEFAULT 1,
@@ -130,7 +131,10 @@ CREATE TABLE IF NOT EXISTS audit (
 """
 
 #: Additive migrations: (table, column, DDL). Applied at connect when the column is missing.
-_MIGRATIONS: list[tuple[str, str, str]] = []
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    # 0.4.0 — the game system an item belongs to (Warhammer 40K, Blood Bowl, …), optional.
+    ("items", "system", "ALTER TABLE items ADD COLUMN system TEXT NOT NULL DEFAULT ''"),
+]
 
 
 class InventoryError(ValueError):
@@ -244,7 +248,7 @@ def check_id(kind: str, value: str) -> str:
 
 
 _ITEM_MONEY = ("cost_basis", "target_low", "target", "target_high", "retail")
-_ITEM_TEXT = ("lot_id", "category", "name", "condition", "notes", "price_basis", "price_updated_on")
+_ITEM_TEXT = ("lot_id", "category", "system", "name", "condition", "notes", "price_basis", "price_updated_on")
 _ITEM_INT = ("quantity", "model_count")
 _LOT_TEXT = ("name", "description", "acquired_on", "source", "notes")
 
@@ -255,6 +259,7 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "id": d["id"],
         "lot_id": d["lot_id"],
         "category": d["category"],
+        "system": d["system"],
         "name": d["name"],
         "condition": d["condition"],
         "quantity": d["quantity"],
@@ -523,6 +528,12 @@ class InventoryStore:
             ]
         return item
 
+    def systems(self) -> list[str]:
+        """The distinct game systems in use (for filters and the item form's suggestions)."""
+        with self._read() as con:
+            rows = con.execute("SELECT DISTINCT system FROM items WHERE system!='' ORDER BY system").fetchall()
+        return [r[0] for r in rows]
+
     def find_item(self, *, lot_id: str, name: str) -> dict | None:
         """The item with this lot + name (case-insensitive) — how a sheet without an id column
         is matched on re-import instead of minting duplicates."""
@@ -539,11 +550,15 @@ class InventoryStore:
         lot_id: str = "",
         status: str = "",
         category: str = "",
+        system: str = "",
         query: str = "",
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
         where, args = [], []
+        if system:
+            where.append("lower(system)=lower(?)")
+            args.append(system)
         if lot_id:
             where.append("lot_id=?")
             args.append(lot_id)
@@ -559,12 +574,15 @@ class InventoryStore:
             args.append(category)
         if query:
             like = f"%{query.lower()}%"
-            where.append("(lower(name) LIKE ? OR lower(notes) LIKE ? OR lower(id) LIKE ? OR lower(category) LIKE ?)")
-            args.extend([like, like, like, like])
+            where.append(
+                "(lower(name) LIKE ? OR lower(notes) LIKE ? OR lower(id) LIKE ? OR lower(category) LIKE ? OR lower(system) LIKE ?)"
+            )
+            args.extend([like, like, like, like, like])
         sql = "SELECT * FROM items"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY lot_id, category, id LIMIT ? OFFSET ?"
+        # Game system first, so the grid and a copied list read system → lot → category.
+        sql += " ORDER BY system, lot_id, category, id LIMIT ? OFFSET ?"
         args.extend([max(1, int(limit)), max(0, int(offset))])
         with self._read() as con:
             rows = con.execute(sql, args).fetchall()

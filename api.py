@@ -36,6 +36,10 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     async def _lots() -> dict:
         return {"lots": store.list_lots()}
 
+    @r.get("/systems")
+    async def _systems() -> dict:
+        return {"systems": store.systems()}
+
     @r.put("/lots/{lot_id}")
     async def _put_lot(lot_id: str, body: dict) -> dict:
         try:
@@ -61,13 +65,14 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         lot_id: str = "",
         status: str = "",
         category: str = "",
+        system: str = "",
         q: str = "",
         limit: int = Query(500, ge=1, le=5000),
         offset: int = Query(0, ge=0),
     ) -> dict:
         try:
             items = store.list_items(
-                lot_id=lot_id, status=status, category=category, query=q, limit=limit, offset=offset
+                lot_id=lot_id, status=status, category=category, system=system, query=q, limit=limit, offset=offset
             )
         except InventoryError as exc:
             _raise(exc)
