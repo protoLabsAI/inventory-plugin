@@ -299,11 +299,11 @@ PAGE = r"""<!doctype html>
     const dropped = [...state.selected].filter((id) => !byId[id]);
     for (const id of dropped) { state.selected.delete(id); delete state.itemsById[id]; }
     const items = live.filter((it) => state.selected.has(it.id));
-    if (!items.length) { toast("Nothing left to copy — the selected items no longer exist", "warning"); render(); return; }
+    if (!items.length) { toast("Nothing left to copy — the selected items no longer exist", "warning"); await refresh(); return; }
     const lotsById = Object.fromEntries(state.lots.map((l) => [l.id, l]));
     const text = mdDoc(items, lotsById);
     const note = dropped.length ? " (" + dropped.length + " no longer exist and were skipped)" : "";
-    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown" + note, dropped.length ? "warning" : "success"); if (dropped.length) render(); return; }
+    if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " as Markdown" + note, dropped.length ? "warning" : "success"); if (dropped.length) await refresh(); return; }
     await dialog({ title: "Copy " + items.length + " items", body: '<label class="pl-field span2"><span class="pl-field__label">The clipboard is blocked in this frame — select all and copy</span><textarea class="pl-field__input copytext" id="copytext" readonly>' + esc(text) + "</textarea></label>", onSubmit: null });
   }
   function renderLots() {
