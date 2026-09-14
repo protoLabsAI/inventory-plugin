@@ -67,3 +67,30 @@ def seeded(store):
     store.mark_sold("C", price=25, channel="eBay", fees=3.5, shipping_charged=5, shipping_cost=4, actor="t")
     store.upsert_item({"id": "D", "lot_id": "LOT-1", "name": "Unpriced D"}, actor="t")
     return store
+
+
+def _cgit(cwd, *args):
+    import subprocess
+
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path):
+    import subprocess
+
+    """A site checkout with an upstream, like ~/dev/nerdsville-site: no src/assets/catalog tracked."""
+    remote, site = tmp_path / "remote.git", tmp_path / "gitsite"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "init", "-q", str(site)], check=True)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _cgit(site, "config", k, v)
+    (site / "src" / "pages").mkdir(parents=True)
+    (site / "src" / "pages" / "index.astro").write_text("home")
+    (site / "package.json").write_text("{}")
+    _cgit(site, "add", "-A")
+    _cgit(site, "commit", "-qm", "init")
+    _cgit(site, "branch", "-M", "main")
+    _cgit(site, "remote", "add", "origin", str(remote))
+    _cgit(site, "push", "-q", "-u", "origin", "main")
+    return site, remote

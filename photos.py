@@ -171,6 +171,14 @@ def read_orientation(data: bytes) -> int | None:
     return None
 
 
+#: A bare JFIF 1.01 header with no thumbnail. The site's image-size reader (Astro's vendored
+#: image-size) skips the FIRST segment after SOI unconditionally, so a file whose first segment is
+#: SOF (what Apple's encoder writes once APP0/APP1 are gone) reads as sizeless and fails the whole
+#: site build. Added only when nothing else leads: never beside an Adobe marker, because JFIF would
+#: make decoders read a transform-0 (RGB) Adobe file as YCbCr.
+_JFIF_APP0 = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+
+
 def _orientation_segment(orientation: int) -> bytes:
     """A minimal EXIF APP1 carrying ONLY the Orientation tag (big-endian TIFF, one IFD0 entry)."""
     ifd = struct.pack(">H", 1) + struct.pack(">HHIH2x", _ORIENTATION_TAG, 3, 1, orientation) + struct.pack(">I", 0)
@@ -181,15 +189,16 @@ def _orientation_segment(orientation: int) -> bytes:
 def sanitize_jpeg(data: bytes) -> bytes:
     """Rebuild a JPEG from a keep-list: the structural segments and scans, an ICC profile, a
     bare Adobe marker, and — when the original was rotated — a fresh EXIF block carrying only
-    the Orientation, written right after SOI. Every APPn/COM beyond that is dropped; a file
+    the Orientation. Kept APPn segments are hoisted right after SOI (a bare JFIF header when
+    nothing else would lead; see _JFIF_APP0). Every other APPn/COM is dropped; a file
     using any other marker (hierarchical, JPEG-LS, reserved) is refused rather than passed on.
     Anything after the end-of-image marker (an iPhone's appended second image) goes."""
     if data[:2] != b"\xff\xd8":
         raise PhotoError("not a JPEG")
     orientation = read_orientation(data)
-    out = bytearray(b"\xff\xd8")
-    if orientation and orientation != 1:
-        out += _orientation_segment(orientation)
+    lead = _orientation_segment(orientation) if orientation and orientation != 1 else b""
+    apps = bytearray()  # kept APPn (ICC, bare Adobe), hoisted to the front in their original order
+    out = bytearray()  # structural segments and scan data
     seen_scan = False
     i, n = 2, len(data)
     while i < n:
@@ -204,8 +213,9 @@ def sanitize_jpeg(data: bytes) -> bytes:
         if marker == _EOI:
             if not seen_scan:
                 raise PhotoError("corrupt JPEG (no image data)")
-            out += b"\xff\xd9"
-            return bytes(out)
+            if not lead and not apps:
+                lead = _JFIF_APP0
+            return b"\xff\xd8" + lead + bytes(apps) + bytes(out) + b"\xff\xd9"
         if marker == 0x01 or marker in _RST:  # TEM or a stray restart outside a scan: carries nothing
             i += 2
             continue
@@ -218,7 +228,7 @@ def sanitize_jpeg(data: bytes) -> bytes:
         i += 2 + length
         if marker in _APPN:
             if _keep_app(marker, payload):
-                out += segment
+                apps += segment
             continue
         if marker == _COM:
             continue

@@ -27,25 +27,6 @@ def _git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
 
 
-@pytest.fixture
-def repo(tmp_path):
-    """A site checkout with an upstream, like ~/dev/nerdsville-site: no src/assets/catalog tracked."""
-    remote, site = tmp_path / "remote.git", tmp_path / "gitsite"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
-    subprocess.run(["git", "init", "-q", str(site)], check=True)
-    for k, v in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
-        _git(site, "config", k, v)
-    (site / "src" / "pages").mkdir(parents=True)
-    (site / "src" / "pages" / "index.astro").write_text("home")
-    (site / "package.json").write_text("{}")
-    _git(site, "add", "-A")
-    _git(site, "commit", "-qm", "init")
-    _git(site, "branch", "-M", "main")
-    _git(site, "remote", "add", "origin", str(remote))
-    _git(site, "push", "-q", "-u", "origin", "main")
-    return site, remote
-
-
 def _item(store, iid, target=10, photo=False, **kw):
     store.upsert_item({"id": iid, "name": iid, "public": True, "notes": "SECRET", **kw}, actor="t")
     if target is not None:

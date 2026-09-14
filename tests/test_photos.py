@@ -172,7 +172,10 @@ def test_jpeg_sanitize_is_idempotent_and_keeps_multi_scan_images():
         ]
     )
     out = ph.sanitize_jpeg(progressive)
-    assert out == progressive  # nothing to strip, nothing lost
+    # nothing to strip, nothing lost; a bare JFIF header now leads, because a file whose first
+    # segment is a table or SOF reads as sizeless to the site's image-size reader
+    assert out == b"\xff\xd8" + ph._JFIF_APP0 + progressive[2:]
+    assert ph.sanitize_jpeg(out) == out
 
 
 def test_a_truncated_jpeg_is_refused():

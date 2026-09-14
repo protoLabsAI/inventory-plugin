@@ -259,6 +259,16 @@ def preview(store: InventoryStore, cfg: dict) -> dict:
     }
 
 
+def _write_fresh(tmp: Path, data: bytes) -> None:
+    """Create ``tmp`` as a NEW regular file. Whatever already sits at the temp name (a planted
+    symlink included) is removed first, and O_EXCL|O_NOFOLLOW refuse one that appears between
+    the unlink and the open, so a write can never be carried through a link."""
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
 def _write_catalog(site: Path, items: list[dict], old: list[dict] | None) -> bool:
     """Write catalog.json — unless the items are unchanged (a fresh generated_at alone must not
     make a diff). Temp file + rename, so the site never sees half a file."""
@@ -268,8 +278,14 @@ def _write_catalog(site: Path, items: list[dict], old: list[dict] | None) -> boo
     path.parent.mkdir(parents=True, exist_ok=True)
     doc = {"version": CATALOG_VERSION, "generated_at": now_iso(), "items": items}
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        _write_fresh(tmp, (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            if not tmp.is_symlink():
+                tmp.unlink(missing_ok=True)
+        raise
     return True
 
 
@@ -316,7 +332,7 @@ def _copy_photos(store: InventoryStore, root: Path, expected: list[str]) -> int:
             dst.parent.mkdir(exist_ok=True)
             existed = dst.exists()
             tmp = dst.with_name(f".{dst.name}.tmp")
-            shutil.copyfile(src, tmp)
+            _write_fresh(tmp, src.read_bytes())
             os.replace(tmp, dst)
             tmp = None
             if not existed:
@@ -371,7 +387,11 @@ def _git(site: Path, *args: str, timeout: int = GIT_TIMEOUT, stdin: str | None =
         text=True,
         input=stdin,
         timeout=timeout,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},  # never hang on a credentials prompt
+        env={
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_LITERAL_PATHSPECS": "1",
+        },  # never hang on a credentials prompt
     )
 
 
@@ -391,12 +411,12 @@ def _own_path(name: str) -> bool:
     return name == CATALOG_REL or name.startswith(ASSETS_REL + "/")
 
 
-def _foreign_unpushed(site: Path) -> int:
+def _foreign_unpushed(site: Path) -> int | None:
     """How many unpushed commits touch anything besides the catalog and its photos (merges and
     empty commits count as foreign). Earlier Publish commits whose push failed don't count."""
-    r = _git(site, "log", "--format=%x00%H", "--name-only", "@{u}..HEAD")
+    r = _git(site, "log", "--no-renames", "--format=%x00%H", "--name-only", "@{u}..HEAD")
     if r.returncode:
-        return 0
+        return None  # couldn't tell: the caller refuses to push
     foreign = 0
     for block in r.stdout.split("\0")[1:]:
         files = [ln for ln in block.splitlines()[1:] if ln.strip()]
@@ -405,25 +425,48 @@ def _foreign_unpushed(site: Path) -> int:
     return foreign
 
 
-def _commit_and_push(site: Path, message: str, *, push: bool) -> dict:
+def _upstream(site: Path) -> tuple[str, str] | None:
+    """``(remote, merge ref)`` of the checked-out branch, or None (detached, or no upstream)."""
+    branch = _git(site, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+    if not branch:
+        return None
+    remote = _git(site, "config", f"branch.{branch}.remote").stdout.strip()
+    merge = _git(site, "config", f"branch.{branch}.merge").stdout.strip()
+    return (remote, merge) if remote and merge and remote != "." else None
+
+
+def _commit_and_push(site: Path, message: str, *, push: bool, expected: list[str] | tuple[str, ...] = ()) -> dict:
     out = {"commit": None, "pushed": False, "push_error": None, "git_error": None}
     try:
         # Measured BEFORE our commit: is there an upstream, and does the branch already carry
         # someone's unpushed work? Publish pushes only its own commits.
-        has_upstream = _git(site, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode == 0
+        upstream = _upstream(site)
+        has_upstream = upstream is not None
         foreign = _foreign_unpushed(site) if has_upstream else 0
-        paths = [
-            p
-            for p in (CATALOG_REL, ASSETS_REL)
-            if (site / p).exists() or _git(site, "ls-files", "--", p).stdout.strip()
+        # Stage exactly what Publish owns: catalog.json, the photos it just placed, and its own
+        # tracked files that are gone. A stray file someone dropped in the photo folder is never
+        # staged (the sweep reports it), and nothing the operator staged rides along.
+        own = [CATALOG_REL] if (site / CATALOG_REL).is_file() else []
+        own += [f"{ASSETS_REL}/{rel}" for rel in expected]
+        gone = [
+            n
+            for n in _git(site, "ls-files", "-z", "--deleted", "--", CATALOG_REL, ASSETS_REL).stdout.split("\0")
+            if n
+            and (n == CATALOG_REL or (n.startswith(ASSETS_REL + "/") and _OWN_FILE_RE.match(n[len(ASSETS_REL) + 1 :])))
         ]
-        if paths:
-            r = _git(site, "add", "-A", "--", *paths)
+        stage = own + gone
+        if stage:
+            r = _git(site, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul", stdin="\0".join(stage) + "\0")
             if r.returncode:
                 out["git_error"] = _tail(r)
                 return out
+            wanted = set(stage)
             names = [
-                n for n in _git(site, "diff", "--cached", "--name-only", "-z", "--", *paths).stdout.split("\0") if n
+                n
+                for n in _git(
+                    site, "diff", "--cached", "--name-only", "-z", "--", CATALOG_REL, ASSETS_REL
+                ).stdout.split("\0")
+                if n in wanted
             ]
             if names:
                 r = _git(
@@ -449,6 +492,11 @@ def _commit_and_push(site: Path, message: str, *, push: bool) -> dict:
                     "later publishes push on their own"
                 )
             return out
+        if foreign is None:
+            out["push_error"] = (
+                "couldn't check the site checkout's unpushed commits, so nothing was pushed — push it yourself"
+            )
+            return out
         if foreign:
             out["push_error"] = (
                 f"your site checkout has {foreign} unpushed commit(s) that weren't made by Publish — "
@@ -459,7 +507,8 @@ def _commit_and_push(site: Path, message: str, *, push: bool) -> dict:
         if ahead.returncode != 0 or ahead.stdout.strip() == "0":
             return out  # nothing new, nothing unpushed
         try:
-            r = _git(site, "push", timeout=PUSH_TIMEOUT)
+            remote, merge = upstream
+            r = _git(site, "push", remote, f"HEAD:{merge}", timeout=PUSH_TIMEOUT)
         except subprocess.TimeoutExpired:
             out["push_error"] = f"git push timed out after {PUSH_TIMEOUT}s"
             return out
@@ -506,7 +555,7 @@ def publish(store: InventoryStore, cfg: dict, expected_hash: str, *, actor: str 
                 n = len(items)
                 a, r, c = len(changes["added"]), len(changes["removed"]), len(changes["changed"])
                 message = f"catalog: publish {n} item{'' if n == 1 else 's'} (+{a} −{r} ~{c})"
-                git = _commit_and_push(site, message, push=as_bool(cfg.get("publish_push"), True))
+                git = _commit_and_push(site, message, push=as_bool(cfg.get("publish_push"), True), expected=expected)
         store.record_audit(
             "publish",
             digest[:12],
