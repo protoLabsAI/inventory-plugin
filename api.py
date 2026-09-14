@@ -226,6 +226,8 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except InventoryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:  # a disk or permission problem in the site checkout
+            raise HTTPException(status_code=500, detail=f"could not write the site files: {exc}") from exc
         emit("published", {"count": out["count"], "commit": out["commit"], "pushed": out["pushed"]})
         return out
 

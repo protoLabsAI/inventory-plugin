@@ -62,6 +62,7 @@ def shop(store):
 def site(tmp_path):
     root = tmp_path / "site"
     (root / "src").mkdir(parents=True)
+    (root / "package.json").write_text("{}")  # Publish only writes into something that looks like the site
     return root
 
 
@@ -204,13 +205,15 @@ def test_the_mirror_only_ever_touches_its_own_folder(shop, site, tmp_path):
     os.symlink(outside, root / "link.txt")
     os.symlink(tmp_path, root / "dirlink")
     (site / "src" / "keep.txt").write_text("mine")
-    _publish(shop, _cfg(site))
-    assert not (root / "STRAY").exists() and not (root / "loose.txt").exists()
-    assert not os.path.lexists(root / "link.txt") and not os.path.lexists(root / "dirlink")
+    out = _publish(shop, _cfg(site))
+    # Files that aren't shaped like Publish's own photos are reported, never deleted; links
+    # are never followed (and never removed: they could be someone's).
+    assert (root / "STRAY" / "x.jpg").exists() and (root / "loose.txt").exists()
+    assert os.path.lexists(root / "link.txt") and os.path.lexists(root / "dirlink")
+    assert sum("left in place" in w for w in out["warnings"]) == 4
     assert outside.read_text() == "keep" and tmp_path.is_dir()
     assert (site / "src" / "keep.txt").read_text() == "mine"
-    files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-    assert files == sorted([f"P1/{shop.cover}.jpg", f"P1/{shop.second}.png"])
+    assert (root / f"P1/{shop.cover}.jpg").is_file() and (root / f"P1/{shop.second}.png").is_file()
 
 
 @pytest.mark.parametrize("linked", ["src/assets", "src/data"])
@@ -219,7 +222,7 @@ def test_a_destination_that_escapes_the_site_is_refused_before_any_write(shop, s
     elsewhere.mkdir()
     (elsewhere / "precious.txt").write_text("x")
     os.symlink(elsewhere, site / linked)
-    with pytest.raises(InventoryError, match="outside the site"):
+    with pytest.raises(InventoryError, match="symbolic link"):
         _publish(shop, _cfg(site))
     assert sorted(p.name for p in elsewhere.iterdir()) == ["precious.txt"]
     assert not (site / "src/data/catalog.json").exists()
@@ -228,7 +231,10 @@ def test_a_destination_that_escapes_the_site_is_refused_before_any_write(shop, s
 def test_a_site_dir_without_src_is_refused(shop, tmp_path):
     (tmp_path / "home").mkdir()
     p = pub.preview(shop, {"site_dir": str(tmp_path / "home")})
-    assert not p["site_dir_ok"] and "no src/" in p["site_dir_problem"]
+    assert (
+        not p["site_dir_ok"]
+        and "missing a src/ folder and an astro.config.mjs or package.json" in p["site_dir_problem"]
+    )
 
 
 # ── git ────────────────────────────────────────────────────────────────────────
@@ -248,6 +254,7 @@ def repo(tmp_path):
         _git(site, "config", k, v)
     (site / "src").mkdir()
     (site / "src" / "index.astro").write_text("x")
+    (site / "package.json").write_text("{}")
     _git(site, "add", "-A")
     _git(site, "commit", "-qm", "init")
     _git(site, "branch", "-M", "main")

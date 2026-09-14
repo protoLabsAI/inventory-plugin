@@ -566,6 +566,14 @@ class InventoryStore:
                     "a new item needs a name" + (f" (no item {item_id!r} exists to update)" if item_id else "")
                 )
             item_id = item_id or new_item_id()
+            twin = con.execute(
+                "SELECT id FROM items WHERE lower(id)=lower(?) AND id<>? LIMIT 1", (item_id, item_id)
+            ).fetchone()
+            if twin is not None:
+                raise InventoryError(
+                    f"item id {item_id!r} differs from the existing item {twin[0]!r} only by letter case — "
+                    "use a different id (photos live in per-item folders, and Mac folders ignore case)"
+                )
             cols = ["id", "created_at", "updated_at", *fields]
             con.execute(
                 f"INSERT INTO items({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
@@ -743,8 +751,8 @@ class InventoryStore:
         folder.mkdir(parents=True, exist_ok=True)
         final = folder / f"{photo_id}.{ext}"
         tmp = folder / f".{photo_id}.{ext}.tmp"
-        tmp.write_bytes(clean)
         try:
+            tmp.write_bytes(clean)
             with self._tx() as con:
                 if con.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
                     raise InventoryError(f"no item {item_id!r}")

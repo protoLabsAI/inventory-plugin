@@ -329,6 +329,13 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
     def inventory_add_photo(item_id: str, path: str, alt: str = "") -> str:
         """Attach a photo file (JPEG, PNG, WebP, or HEIC on a Mac) from the agent workspace to an item. Location, camera and other metadata are stripped on the way in. The first photo is the item's cover on the public site. `alt` describes the photo for people using screen readers, e.g. "Griff Oberwald miniature, front view, unpainted"."""
         try:
+            if not str(cfg.get("workspace_dir") or "").strip():
+                return _err(
+                    InventoryError(
+                        "no agent workspace is configured, so photos can't be read from disk — "
+                        "set inventory.workspace_dir, or add photos in the Inventory view"
+                    )
+                )
             p = resolve_workspace_path(cfg, path)
             if not p.is_file():
                 return _err(InventoryError(f"no file at {path!r}"))

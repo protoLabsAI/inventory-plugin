@@ -60,7 +60,11 @@ PAGE = r"""<!doctype html>
   .photo-actions{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
   .photo-status{font-size:12px;color:var(--pl-color-fg-muted);min-height:1em}
   .pv-h{font-weight:600;margin-top:var(--pl-space-3)}
-  .pv-list{margin:4px 0 0;padding-left:18px;max-height:180px;overflow:auto}
+  .pv-list{margin:4px 0 0;padding-left:18px;max-height:320px;overflow:auto}
+  .pv-entry{margin:4px 0 10px}.pv-price{font-weight:600}.pv-blurb{white-space:pre-line;margin-top:2px}
+  .pv-thumbs{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;align-items:center}
+  .pv-thumb{width:64px;height:64px;border-radius:4px;overflow:hidden;background:rgba(127,127,127,.15)}
+  .pv-thumb img{width:100%;height:100%;object-fit:cover;display:block}
   @media (max-width:640px){.form{grid-template-columns:1fr}.bar .pl-input,.bar .pl-select{min-width:100px}}
 </style>
 <script>
@@ -163,16 +167,35 @@ PAGE = r"""<!doctype html>
     '<input class="pl-field__input" data-alt="' + esc(p.id) + '" value="' + esc(p.alt) + '" placeholder="Describe the photo" aria-label="Alt text for this photo">' +
     '<div class="photo-actions">' + (k === 0 ? '<span class="chip chip--site">cover</span>' : '<button type="button" class="pl-btn pl-btn--xs" data-cover="' + esc(p.id) + '">Make cover</button>') +
     '<button type="button" class="pl-btn pl-btn--xs pl-btn--ghost" data-pdel="' + esc(p.id) + '">Delete</button></div></div>';
-  // The Publish dialog's body: where it goes, and the diff against what the site has now.
+  // One catalog entry as a buyer will see it: price, condition, blurb and the photos (empty
+  // frames here; publishDialog fills them through the authed API once the dialog is open).
+  const PV_THUMBS = 6;
+  const pvPrice = (c) => "$" + (c % 100 === 0 ? String(c / 100) : (c / 100).toFixed(2));
+  function pvEntry(e) {
+    if (!e) return "";
+    const photos = e.photos || [];
+    const thumbs = photos.slice(0, PV_THUMBS).map((ph) => {
+      const f = String(ph.file || ""), slash = f.indexOf("/"), dot = f.lastIndexOf(".");
+      return '<span class="pv-thumb" data-thumb-item="' + esc(f.slice(0, slash)) + '" data-thumb-photo="' + esc(f.slice(slash + 1, dot)) + '" title="' + esc(ph.alt || "") + '"></span>';
+    }).join("") + (photos.length > PV_THUMBS ? '<span class="muted">+' + (photos.length - PV_THUMBS) + " more</span>" : "");
+    return '<div class="pv-entry"><span class="pv-price">' + esc(pvPrice(Number(e.price_cents) || 0)) + "</span>" +
+      (e.condition ? ' <span class="chip">' + esc(e.condition) + "</span>" : "") + (Number(e.quantity) > 1 ? ' <span class="muted">×' + esc(e.quantity) + "</span>" : "") +
+      '<div class="pv-blurb">' + (e.blurb ? esc(e.blurb) : '<span class="muted">No blurb.</span>') + "</div>" +
+      (thumbs ? '<div class="pv-thumbs">' + thumbs + "</div>" : '<div class="muted">No photos.</div>') +
+      ((e.links || []).length ? '<div class="muted">Buy links: ' + e.links.map((l) => esc(l.channel)).join(", ") + "</div>" : "") + "</div>";
+  }
+  // The Publish dialog's body: where it goes, the diff against what the site has now, and for
+  // every added or changed item exactly what a buyer will read and see.
   function previewHtml(p) {
+    const byId = Object.fromEntries((p.items_preview || []).map((e) => [e.id, e]));
     const list = (title, rows, row) => rows && rows.length ? '<div class="pv-h">' + esc(title) + " (" + rows.length + ')</div><ul class="pv-list">' + rows.map((r) => "<li>" + row(r) + "</li>").join("") + "</ul>" : "";
     const none = !p.added.length && !p.removed.length && !p.changed.length;
     return (p.site_dir_ok ? "" : '<div class="span2 pl-callout pl-callout--warning">' + esc(p.site_dir_problem || "Set the site directory first.") + "</div>") +
       '<div class="span2">' + esc(p.count) + " item" + (p.count === 1 ? "" : "s") + " would be on the site" + (p.site_dir ? ' <span class="muted">in ' + esc(p.site_dir) + "</span>" : "") + ". Only the name, system, category, condition, asking price, quantity, blurb, photos and live listing links are published." +
       (none && p.site_dir_ok ? '<div class="muted">Nothing changed since the last publish.</div>' : "") +
-      list("Added", p.added, (r) => esc(r.name) + ' <span class="muted">' + esc(r.id) + "</span>") +
+      list("Added", p.added, (r) => esc(r.name) + ' <span class="muted">' + esc(r.id) + "</span>" + pvEntry(byId[r.id])) +
       list("Removed", p.removed, (r) => esc(r.name || r.id) + ' <span class="muted">' + esc(r.id) + "</span>") +
-      list("Changed", p.changed, (r) => esc(r.name) + ' <span class="muted">' + esc((r.fields || []).join(", ")) + "</span>") +
+      list("Changed", p.changed, (r) => esc(r.name) + ' <span class="muted">' + esc((r.fields || []).join(", ")) + "</span>" + pvEntry(byId[r.id])) +
       list("Marked public but left out", p.skipped, (r) => esc(r.name) + ' <span class="muted">— ' + esc(r.reason) + "</span>") +
       list("Warnings", p.warnings, (w) => esc(w)) + "</div>";
   }
@@ -470,7 +493,7 @@ PAGE = r"""<!doctype html>
     let p;
     try { p = await api("/publish/preview"); } catch (e) { toast(e.message || String(e), "error"); return; }
     let published = false;
-    await dialog({
+    const done = dialog({
       title: "Publish the site catalog", submit: "Publish " + p.count + " item" + (p.count === 1 ? "" : "s"),
       body: previewHtml(p),
       onSubmit: async (v, form) => {
@@ -487,6 +510,20 @@ PAGE = r"""<!doctype html>
         return false;  // keep it open so the result is readable
       },
     });
+    // The photos being published, through the authed API as blobs (an <img> can't carry the bearer).
+    const urls = []; let closed = false;
+    document.querySelectorAll("[data-thumb-photo]").forEach(async (slot) => {
+      try {
+        const r = await kit.apiFetch(API + "/items/" + encodeURIComponent(slot.dataset.thumbItem) + "/photos/" + encodeURIComponent(slot.dataset.thumbPhoto));
+        if (!r.ok) return;
+        const u = URL.createObjectURL(await r.blob());
+        if (closed) { URL.revokeObjectURL(u); return; }
+        urls.push(u);
+        const img = document.createElement("img"); img.src = u; img.alt = slot.title || ""; slot.appendChild(img);
+      } catch (e) { /* a missing thumbnail is cosmetic; the list still says what is published */ }
+    });
+    await done;
+    closed = true; for (const u of urls) URL.revokeObjectURL(u);
   }
   async function lotDialog(lot) {
     const l = lot || {};

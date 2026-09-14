@@ -144,8 +144,8 @@ def test_jpeg_loses_gps_and_every_other_tag_but_keeps_orientation_6(le):
     assert out.count(b"Exif\x00\x00") == 1
     for needle in (b"45,31N", b"Portland", b"shot at", b"xmpmeta", b"MPF\x00", b"Cam\x00", b"8BIM"):
         assert needle not in out, needle
-    assert b"ICC_PROFILE" in out and out[2:4] == b"\xff\xe0"  # colour kept; JFIF stays first
-    assert [m for m, _ in ph.header_segments(out)][:2] == [0xE0, 0xE1]  # orientation right after JFIF
+    assert b"ICC_PROFILE" in out and b"JFIF" not in out  # colour kept; the JFIF header (and any thumbnail) goes
+    assert [m for m, _ in ph.header_segments(out)][:2] == [0xE1, 0xE2]  # orientation first, right after SOI
     assert SCAN in out  # stuffed bytes and restart markers inside the scan survive verbatim
     assert out.endswith(b"\xff\xd9") and out.count(b"\xff\xd8") == 1  # the appended second image is gone
 

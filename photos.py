@@ -3,9 +3,10 @@ one EXIF field needed to show them upright) is ever stored, let alone published.
 
 A phone photo carries GPS coordinates, the camera serial and the time it was taken; the
 catalog is public, so metadata is stripped at the door rather than at publish time.
-Allowlists, not blocklists: a JPEG keeps only the segments a decoder needs (quantisation,
-Huffman, frame, scan) plus a JFIF header, an ICC colour profile and the Adobe colour
-marker; a PNG keeps only its image chunks; a WebP only its image and colour chunks.
+Keep-lists, not blocklists: a JPEG keeps only the segments a decoder needs (quantisation,
+Huffman, frame, scan) plus an ICC colour profile and a bare Adobe colour marker — unusual
+markers are refused, not passed on; a PNG keeps only its image chunks (the ICC profile's
+free-text name is replaced); a still WebP only its image and colour chunks.
 Everything after a JPEG's end-of-image marker (the extra images an iPhone appends) goes.
 
 Pure Python on purpose: Pillow is not guaranteed in the frozen desktop runtime. HEIC/HEIF
@@ -15,10 +16,12 @@ is converted with macOS ``sips`` when it is on PATH, else refused with a clear m
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import struct
 import subprocess
 import tempfile
+import zlib
 
 #: Upload cap. A full-resolution phone JPEG is 3–8 MB; a HEIC converts to about that.
 MAX_BYTES = 20 * 1024 * 1024
@@ -56,21 +59,41 @@ def sniff(data: bytes) -> str | None:
 
 # ── JPEG ───────────────────────────────────────────────────────────────────────
 _SOI, _EOI, _SOS = 0xD8, 0xD9, 0xDA
-#: Markers with no length field: TEM and the restart markers.
-_STANDALONE = {0x01, *range(0xD0, 0xD8)}
+_RST = set(range(0xD0, 0xD8))
 _ORIENTATION_TAG = 0x0112
+#: The only length-carrying segments kept verbatim — what a decoder needs: the frame headers
+#: (SOF0–3, 5–7, 9–11, 13–15), Huffman and arithmetic-coding tables (DHT, DAC), quantisation
+#: tables (DQT), the restart interval (DRI), the line count (DNL) and each scan header (SOS).
+_STRUCTURAL = {
+    *range(0xC0, 0xC4),
+    *range(0xC5, 0xC8),
+    *range(0xC9, 0xCC),
+    *range(0xCD, 0xD0),
+    0xC4,
+    0xCC,
+    0xDB,
+    0xDC,
+    0xDD,
+    _SOS,
+}
+_APPN = set(range(0xE0, 0xF0))
+_COM = 0xFE
+_FILL_RUN = re.compile(rb"\xff+")
+#: Inside entropy-coded data a 0xFF is followed by 0x00 (a stuffed byte), a restart marker or
+#: another fill byte; anything else is the next real marker. Searched in C, not a Python loop.
+_NEXT_MARKER = re.compile(rb"\xff(?![\x00\xd0-\xd7\xff])")
 
 
 def _keep_app(marker: int, payload: bytes) -> bool:
-    """Which APPn segments survive: the JFIF header, an ICC profile and the Adobe colour
-    marker. EXIF (APP1), XMP (APP1), Photoshop/IPTC (APP13), MPF, thumbnails, maker notes —
-    all dropped."""
-    if marker == 0xE0:
-        return payload.startswith(b"JFIF\x00")
+    """APP2 ``ICC_PROFILE`` survives: it is the colour profile (Display P3 on an iPhone) needed to
+    show the colours right, and it carries no location. So does the Adobe APP14 marker when it is
+    exactly the standard 12 bytes (a version and the colour-transform flag CMYK/YCCK files need).
+    Every other APPn is dropped: EXIF and XMP (APP1 — a fresh orientation-only EXIF is written
+    back), the JFIF header and its thumbnail (APP0), IPTC/Photoshop (APP13), MPF, maker notes."""
     if marker == 0xE2:
         return payload.startswith(b"ICC_PROFILE\x00")
     if marker == 0xEE:
-        return payload.startswith(b"Adobe")
+        return len(payload) == 12 and payload.startswith(b"Adobe")
     return False
 
 
@@ -84,9 +107,9 @@ def header_segments(data: bytes) -> list[tuple[int, bytes]]:
     while i + 4 <= n and data[i] == 0xFF:
         marker = data[i + 1]
         if marker == 0xFF:
-            i += 1
+            i = _FILL_RUN.match(data, i).end() - 1
             continue
-        if marker in _STANDALONE:
+        if marker == 0x01 or marker in _RST:
             i += 2
             continue
         if marker in (_SOS, _EOI):
@@ -156,31 +179,34 @@ def _orientation_segment(orientation: int) -> bytes:
 
 
 def sanitize_jpeg(data: bytes) -> bytes:
-    """Rebuild a JPEG from the segments a decoder needs; see the module docstring. When the
-    original was rotated (Orientation ≠ 1), a minimal EXIF block carrying only that is
-    written back so the photo still displays upright."""
+    """Rebuild a JPEG from a keep-list: the structural segments and scans, an ICC profile, a
+    bare Adobe marker, and — when the original was rotated — a fresh EXIF block carrying only
+    the Orientation, written right after SOI. Every APPn/COM beyond that is dropped; a file
+    using any other marker (hierarchical, JPEG-LS, reserved) is refused rather than passed on.
+    Anything after the end-of-image marker (an iPhone's appended second image) goes."""
     if data[:2] != b"\xff\xd8":
         raise PhotoError("not a JPEG")
     orientation = read_orientation(data)
-    pending = _orientation_segment(orientation) if orientation and orientation != 1 else b""
     out = bytearray(b"\xff\xd8")
+    if orientation and orientation != 1:
+        out += _orientation_segment(orientation)
+    seen_scan = False
     i, n = 2, len(data)
     while i < n:
         if data[i] != 0xFF:
             raise PhotoError(f"corrupt JPEG (expected a marker at byte {i})")
-        if i + 1 < n and data[i + 1] == 0xFF:  # fill byte
-            i += 1
-            continue
         if i + 1 >= n:
             break
         marker = data[i + 1]
+        if marker == 0xFF:  # a run of fill bytes before the marker
+            i = _FILL_RUN.match(data, i).end() - 1
+            continue
         if marker == _EOI:
-            if pending:
+            if not seen_scan:
                 raise PhotoError("corrupt JPEG (no image data)")
             out += b"\xff\xd9"
-            return bytes(out)  # anything after the end-of-image marker is dropped
-        if marker in _STANDALONE:
-            out += data[i : i + 2]
+            return bytes(out)
+        if marker == 0x01 or marker in _RST:  # TEM or a stray restart outside a scan: carries nothing
             i += 2
             continue
         if i + 4 > n:
@@ -190,38 +216,29 @@ def sanitize_jpeg(data: bytes) -> bytes:
             raise PhotoError("corrupt JPEG (a segment runs past the end of the file)")
         segment, payload = data[i : i + 2 + length], data[i + 4 : i + 2 + length]
         i += 2 + length
-        if 0xE0 <= marker <= 0xEF:
-            if not _keep_app(marker, payload):
-                continue
-        elif marker == 0xFE:  # COM
+        if marker in _APPN:
+            if _keep_app(marker, payload):
+                out += segment
             continue
-        if pending and marker != 0xE0:  # after SOI and any JFIF header, before everything else
-            out += pending
-            pending = b""
+        if marker == _COM:
+            continue
+        if marker not in _STRUCTURAL:
+            raise PhotoError(
+                f"this JPEG uses an unusual encoding (marker 0xFF{marker:02X}) — re-save it as a standard JPEG and upload that"
+            )
         out += segment
         if marker == _SOS:
-            j = i  # entropy-coded data runs to the next real marker
-            while j < n:
-                if data[j] != 0xFF:
-                    j += 1
-                    continue
-                if j + 1 >= n:
-                    j = n
-                    break
-                nxt = data[j + 1]
-                if nxt == 0x00 or 0xD0 <= nxt <= 0xD7:
-                    j += 2
-                elif nxt == 0xFF:
-                    j += 1
-                else:
-                    break
+            seen_scan = True
+            m = _NEXT_MARKER.search(data, i)
+            j = m.start() if m else n
             out += data[i:j]
             i = j
     raise PhotoError("truncated JPEG (no end-of-image marker) — the upload may have been cut off")
 
 
 # ── PNG ────────────────────────────────────────────────────────────────────────
-#: Image and colour chunks only; text, EXIF, timestamps and private chunks are dropped.
+#: Image and colour chunks only (APNG's animation chunks included); text, EXIF, timestamps,
+#: suggested palettes (sPLT, which carries a free-text name) and private chunks are dropped.
 _PNG_KEEP = {
     b"IHDR",
     b"PLTE",
@@ -235,15 +252,14 @@ _PNG_KEEP = {
     b"sBIT",
     b"bKGD",
     b"pHYs",
-    b"hIST",
-    b"sPLT",
-    b"cICP",
-    b"mDCv",
-    b"cLLi",
     b"acTL",
     b"fcTL",
     b"fdAT",
 }
+
+
+def _png_chunk(ctype: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + ctype + body + struct.pack(">I", zlib.crc32(ctype + body) & 0xFFFFFFFF)
 
 
 def sanitize_png(data: bytes) -> bytes:
@@ -257,7 +273,13 @@ def sanitize_png(data: bytes) -> bytes:
         end = i + 12 + length
         if end > n:
             break
-        if ctype in _PNG_KEEP:
+        if ctype == b"iCCP":
+            # The profile's free-text name can say anything; the profile itself is colour data.
+            body = data[i + 8 : i + 8 + length]
+            k = body.find(b"\x00")
+            if 1 <= k <= 79:
+                out += _png_chunk(b"iCCP", b"ICC profile" + body[k:])
+        elif ctype in _PNG_KEEP:
             out += data[i:end]
         i = end
         if ctype == b"IEND":
@@ -266,11 +288,14 @@ def sanitize_png(data: bytes) -> bytes:
 
 
 # ── WebP ───────────────────────────────────────────────────────────────────────
-_WEBP_KEEP = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF", b"ICCP"}
-_VP8X_EXIF, _VP8X_XMP = 0x08, 0x04
+_WEBP_KEEP = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ICCP"}
+_VP8X_ANIM, _VP8X_EXIF, _VP8X_XMP = 0x02, 0x08, 0x04
+_ANIMATED = "animated WebP isn't supported — upload a still photo (JPEG, PNG or a still WebP)"
 
 
 def sanitize_webp(data: bytes) -> bytes:
+    """Keep the image, alpha and colour chunks; drop EXIF and XMP and clear their flags.
+    Animated WebP is refused: its frames can nest chunks of their own."""
     if not (len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
         raise PhotoError("not a WebP")
     end = min(len(data), 8 + struct.unpack("<I", data[4:8])[0])
@@ -282,6 +307,8 @@ def sanitize_webp(data: bytes) -> bytes:
         body_end = i + 8 + size
         if body_end > end:
             raise PhotoError("truncated WebP — the upload may have been cut off")
+        if fourcc in (b"ANIM", b"ANMF"):
+            raise PhotoError(_ANIMATED)
         chunk = bytearray(data[i:body_end])
         if size & 1:
             chunk += b"\x00"  # RIFF pads odd chunks to an even length
@@ -289,9 +316,11 @@ def sanitize_webp(data: bytes) -> bytes:
         if fourcc not in _WEBP_KEEP:
             continue
         if fourcc == b"VP8X" and size >= 1:
+            if chunk[8] & _VP8X_ANIM:
+                raise PhotoError(_ANIMATED)
             chunk[8] &= ~(_VP8X_EXIF | _VP8X_XMP) & 0xFF
         chunks.append(bytes(chunk))
-    if not any(c[:4] in (b"VP8 ", b"VP8L", b"ANMF") for c in chunks):
+    if not any(c[:4] in (b"VP8 ", b"VP8L") for c in chunks):
         raise PhotoError("WebP has no image data")
     body = b"WEBP" + b"".join(chunks)
     return b"RIFF" + struct.pack("<I", len(body)) + body

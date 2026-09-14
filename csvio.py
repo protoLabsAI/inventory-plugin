@@ -26,7 +26,7 @@ ITEM_ALIASES: dict[str, tuple[str, ...]] = {
     "system": ("system", "game_system", "game"),
     "name": ("item", "name", "title", "item_name"),
     "condition": ("condition", "cond"),
-    "public": ("public", "on_site", "show_on_site", "published"),
+    "public": ("public", "on_site", "show_on_site"),
     "blurb": ("blurb", "public_blurb", "site_blurb"),
     "quantity": ("unit_quantity", "quantity", "qty"),
     "model_count": ("model_count", "models"),
