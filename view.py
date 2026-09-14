@@ -48,6 +48,19 @@ PAGE = r"""<!doctype html>
   .selbar{display:flex;align-items:center;gap:var(--pl-space-2);padding:var(--pl-space-2) 0;font-size:12px;color:var(--pl-color-fg-muted)}
   .selbar .pl-kbd{font-family:var(--pl-font-mono);font-size:11px;padding:1px 5px;border:var(--pl-border-width) solid var(--pl-color-border);border-radius:4px}
   textarea.copytext{width:100%;min-height:160px;font-family:var(--pl-font-mono);font-size:12px}
+  .chip{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;font-size:10px;line-height:16px;border:var(--pl-border-width) solid var(--pl-color-border);color:var(--pl-color-fg-muted);vertical-align:1px}
+  .chip--site{border-color:var(--pl-color-accent);color:var(--pl-color-accent)}
+  .check{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .check .pl-field__hint{flex-basis:100%}
+  .photos{display:grid;gap:var(--pl-space-2)}
+  .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:var(--pl-space-2)}
+  .photo{display:grid;gap:6px;align-content:start;border:var(--pl-border-width) solid var(--pl-color-border);border-radius:6px;padding:6px}
+  .photo img{display:block;width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;background:var(--pl-color-bg-subtle)}
+  .photo .pl-field__input{font-size:12px;padding:4px 6px}
+  .photo-actions{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+  .photo-status{font-size:12px;color:var(--pl-color-fg-muted);min-height:1em}
+  .pv-h{font-weight:600;margin-top:var(--pl-space-3)}
+  .pv-list{margin:4px 0 0;padding-left:18px;max-height:180px;overflow:auto}
   @media (max-width:640px){.form{grid-template-columns:1fr}.bar .pl-input,.bar .pl-select{min-width:100px}}
 </style>
 <script>
@@ -61,6 +74,7 @@ PAGE = r"""<!doctype html>
   <div class="pl-panel-header pl-panel-header--compact">
     <div><div class="pl-panel-header__kicker">Source of truth</div><h1 class="pl-panel-header__title">Inventory</h1></div>
     <div class="pl-panel-header__actions">
+      <button class="pl-btn pl-btn--sm" id="btn-publish" title="Review what the public site would show, then publish it">Publish</button>
       <button class="pl-btn pl-btn--sm" id="btn-import">Import CSV</button>
       <button class="pl-btn pl-btn--sm" id="btn-export">Export CSV</button>
       <button class="pl-btn pl-btn--sm" id="btn-lot">+ Lot</button>
@@ -140,6 +154,32 @@ PAGE = r"""<!doctype html>
     } catch (e) { return false; }
   }
 
+  // Row markers: on the public site, and how many photos.
+  const itemChips = (it) => (it.public ? '<span class="chip chip--site" title="Marked for the public site">site</span>' : "") +
+    (Number(it.photo_count) > 0 ? '<span class="chip" title="Photos">' + Number(it.photo_count) + " photo" + (Number(it.photo_count) === 1 ? "" : "s") + "</span>" : "");
+  // One photo in the Edit dialog: the thumbnail (a blob: URL of the authed bytes), alt text, cover/delete.
+  const photoCard = (p, k, url) => '<div class="photo" data-photo="' + esc(p.id) + '">' +
+    (url ? '<img src="' + esc(url) + '" alt="' + esc(p.alt) + '">' : '<div class="muted">preview unavailable</div>') +
+    '<input class="pl-field__input" data-alt="' + esc(p.id) + '" value="' + esc(p.alt) + '" placeholder="Describe the photo" aria-label="Alt text for this photo">' +
+    '<div class="photo-actions">' + (k === 0 ? '<span class="chip chip--site">cover</span>' : '<button type="button" class="pl-btn pl-btn--xs" data-cover="' + esc(p.id) + '">Make cover</button>') +
+    '<button type="button" class="pl-btn pl-btn--xs pl-btn--ghost" data-pdel="' + esc(p.id) + '">Delete</button></div></div>';
+  // The Publish dialog's body: where it goes, and the diff against what the site has now.
+  function previewHtml(p) {
+    const list = (title, rows, row) => rows && rows.length ? '<div class="pv-h">' + esc(title) + " (" + rows.length + ')</div><ul class="pv-list">' + rows.map((r) => "<li>" + row(r) + "</li>").join("") + "</ul>" : "";
+    const none = !p.added.length && !p.removed.length && !p.changed.length;
+    return (p.site_dir_ok ? "" : '<div class="span2 pl-callout pl-callout--warning">' + esc(p.site_dir_problem || "Set the site directory first.") + "</div>") +
+      '<div class="span2">' + esc(p.count) + " item" + (p.count === 1 ? "" : "s") + " would be on the site" + (p.site_dir ? ' <span class="muted">in ' + esc(p.site_dir) + "</span>" : "") + ". Only the name, system, category, condition, asking price, quantity, blurb, photos and live listing links are published." +
+      (none && p.site_dir_ok ? '<div class="muted">Nothing changed since the last publish.</div>' : "") +
+      list("Added", p.added, (r) => esc(r.name) + ' <span class="muted">' + esc(r.id) + "</span>") +
+      list("Removed", p.removed, (r) => esc(r.name || r.id) + ' <span class="muted">' + esc(r.id) + "</span>") +
+      list("Changed", p.changed, (r) => esc(r.name) + ' <span class="muted">' + esc((r.fields || []).join(", ")) + "</span>") +
+      list("Marked public but left out", p.skipped, (r) => esc(r.name) + ' <span class="muted">— ' + esc(r.reason) + "</span>") +
+      list("Warnings", p.warnings, (w) => esc(w)) + "</div>";
+  }
+  const publishResultText = (d) => "Published " + d.count + " item" + (d.count === 1 ? "" : "s") + " (+" + d.added.length + " −" + d.removed.length + " ~" + d.changed.length + ")" +
+    (d.wrote_catalog ? "" : " · catalog unchanged") + " · photos copied " + d.photos_copied + ", removed " + d.photos_deleted +
+    (d.commit ? "\ncommit " + d.commit + (d.pushed ? " · pushed" : "") : "\nno new commit") + (d.push_error ? "\npush failed: " + d.push_error : "") + (d.git_error ? "\ngit: " + d.git_error : "");
+
   // RULES 2+3 — every data call goes through the kit's slug-aware, bearer-carrying fetch with a bare path.
   async function api(path, method = "GET", body) {
     const init = { method, headers: {} };
@@ -168,6 +208,9 @@ PAGE = r"""<!doctype html>
     if (opts.type === "select") {
       input = '<select class="pl-field__input" id="' + id + '" name="' + name + '">' +
         opts.options.map((o) => { const [v, l] = Array.isArray(o) ? o : [o, o]; return '<option value="' + esc(v) + '"' + (String(v) === String(value) ? " selected" : "") + ">" + esc(l) + "</option>"; }).join("") + "</select>";
+    } else if (opts.type === "checkbox") {
+      return '<label class="pl-field check' + (opts.span2 ? " span2" : "") + '"><input type="checkbox" id="' + id + '" name="' + name + '" value="1"' + (value ? " checked" : "") + '><span class="pl-field__label">' + esc(label) + "</span>" +
+        (opts.hint ? '<span class="pl-field__hint">' + esc(opts.hint) + "</span>" : "") + "</label>";
     } else if (opts.type === "textarea") {
       input = '<textarea class="pl-field__input" id="' + id + '" name="' + name + '" placeholder="' + esc(opts.placeholder || "") + '">' + esc(value) + "</textarea>";
     } else {
@@ -277,7 +320,7 @@ PAGE = r"""<!doctype html>
       return "<tr" + (state.selected.has(it.id) ? ' class="pl-tr--selected"' : "") + ">" +
         '<td class="sel"><input type="checkbox" data-sel="' + esc(it.id) + '"' + (state.selected.has(it.id) ? " checked" : "") + ' aria-label="Select ' + esc(it.name) + '"></td>' +
         '<td class="muted">' + esc(it.id) + "</td>" +
-        '<td class="wrap-cell">' + ed("name", it.name) + '<span class="sub">' + ed("category", it.category) + " · " + ed("condition", it.condition) + "</span></td>" +
+        '<td class="wrap-cell">' + ed("name", it.name) + '<span class="sub">' + ed("category", it.category) + " · " + ed("condition", it.condition) + itemChips(it) + "</span></td>" +
         '<td class="wrap-cell">' + ed("system", it.system) + "</td>" +
         '<td class="num">' + ed("quantity", it.quantity) + "</td>" +
         '<td><select class="pl-select status" data-status="' + esc(it.id) + '">' + STATUSES.map((s) => '<option' + (s === it.status ? " selected" : "") + ">" + s + "</option>").join("") + "</select></td>" +
@@ -339,9 +382,65 @@ PAGE = r"""<!doctype html>
     return opts;
   };
 
+  // The Edit dialog's photo manager: thumbnails come through the authed API as blobs (an <img>
+  // can't carry the bearer); uploads send the File itself as the body. No drag-and-drop —
+  // the desktop app's webview swallows HTML5 drops — a file picker only.
+  function mountPhotos(id) {
+    const base = "/items/" + encodeURIComponent(id) + "/photos";
+    let urls = [], changed = false, disposed = false;
+    const revoke = () => { for (const u of urls) URL.revokeObjectURL(u); urls = []; };
+    const status = (msg, bad = false) => { const el = $("#photo-status"); if (el) { el.textContent = msg; el.className = bad ? "photo-status pl-callout pl-callout--error" : "photo-status"; } };
+    async function load() {
+      let list;
+      try { list = (await api(base)).photos || []; } catch (e) { status(e.message, true); return; }
+      const fresh = await Promise.all(list.map(async (p) => {
+        try { const r = await kit.apiFetch(API + base + "/" + encodeURIComponent(p.id)); return r.ok ? URL.createObjectURL(await r.blob()) : ""; } catch (e) { return ""; }
+      }));
+      revoke(); urls = fresh.filter(Boolean);
+      if (disposed) { revoke(); return; }
+      const grid = $("#photo-grid"); if (!grid) return;
+      grid.innerHTML = list.length ? list.map((p, k) => photoCard(p, k, fresh[k])).join("") : '<div class="muted">No photos yet. The first one is the cover on the site.</div>';
+      grid.querySelectorAll("[data-alt]").forEach((inp) => {
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
+        inp.addEventListener("change", async () => { try { await api(base + "/" + encodeURIComponent(inp.dataset.alt), "PATCH", { alt: inp.value }); changed = true; status("Alt text saved"); } catch (e) { status(e.message, true); } });
+      });
+      grid.querySelectorAll("[data-cover]").forEach((b) => b.addEventListener("click", async () => {
+        try { await api(base + "/" + encodeURIComponent(b.dataset.cover), "PATCH", { position: 0 }); changed = true; status("Cover changed"); await load(); } catch (e) { status(e.message, true); }
+      }));
+      grid.querySelectorAll("[data-pdel]").forEach((b) => b.addEventListener("click", async () => {
+        if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Confirm delete"; b.classList.add("pl-btn--danger"); return; }
+        try { await api(base + "/" + encodeURIComponent(b.dataset.pdel), "DELETE"); changed = true; status("Photo deleted"); await load(); } catch (e) { status(e.message, true); }
+      }));
+    }
+    const input = $("#photo-file");
+    if (input) input.addEventListener("change", async () => {
+      const files = [...(input.files || [])]; if (!files.length) return;
+      input.disabled = true; let ok = 0; const errors = [];
+      for (let k = 0; k < files.length; k++) {
+        const f = files[k];
+        status("Uploading " + (k + 1) + " of " + files.length + ": " + f.name + "…");
+        try {
+          const r = await kit.apiFetch(API + base + "?alt=", { method: "POST", headers: { "Content-Type": f.type || "application/octet-stream" }, body: f });
+          if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) { d = ""; } throw new Error(d || (r.status + " " + r.statusText)); }
+          ok++; changed = true;
+        } catch (e) { errors.push(f.name + ": " + (e.message || e)); }
+      }
+      input.value = ""; input.disabled = false;
+      status(ok + " of " + files.length + " uploaded" + (errors.length ? ". " + errors.join(" · ") : ""), errors.length > 0);
+      await load();
+    });
+    load();
+    return { dispose() { disposed = true; revoke(); if (changed) refresh(); } };
+  }
+
   async function itemDialog(item) {
     const it = item || { lot_id: state.filters.lot, status: "available", quantity: 1 };
-    await dialog({
+    const photosHtml = item
+      ? '<div class="span2 photos"><div class="kicker">Photos</div><div class="photo-grid" id="photo-grid"><div class="muted">Loading photos…</div></div>' +
+        '<label class="pl-field"><span class="pl-field__label">Add photos</span><input class="pl-field__input" type="file" id="photo-file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif" multiple>' +
+        '<span class="pl-field__hint">JPEG, PNG, WebP or HEIC, up to 20 MB each. Location and camera data are removed on upload.</span></label><div class="photo-status" id="photo-status"></div></div>'
+      : '<div class="span2 muted">Add the item first, then open Edit to add photos.</div>';
+    const done = dialog({
       title: item ? "Edit " + item.id : "New item", submit: item ? "Save" : "Add",
       body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
         field("system", "Game system", it.system || "", { placeholder: "Warhammer 40K, Blood Bowl…", list: "systems-dl", hint: "Optional. Lists and copied Markdown group by it." }) +
@@ -349,13 +448,43 @@ PAGE = r"""<!doctype html>
         field("status", "Status", it.status, { type: "select", options: STATUSES.filter((s) => s !== "sold" || it.status === "sold") }) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
         field("retail", "Retail ($)", it.retail ?? "", { type: "number", step: "0.01", hint: "The anchor price, not a target." }) + field("cost_basis", "Cost basis ($)", it.cost_basis ?? "", { type: "number", step: "0.01" }) +
-        field("notes", "Notes", it.notes, { type: "textarea", span2: true }),
+        field("notes", "Notes", it.notes, { type: "textarea", span2: true, hint: "Private. Never published." }) +
+        '<div class="span2 kicker">Public site</div>' +
+        field("public", "Show on the public site", !!it.public, { type: "checkbox", span2: true, hint: "Only items that are available or listed and have a target price get published, and only when you press Publish." }) +
+        field("blurb", "Public blurb", it.blurb || "", { type: "textarea", span2: true, placeholder: "One or two sentences a buyer reads on the site. No cost, lot or private notes." }) +
+        photosHtml,
       onSubmit: async (v) => {
         if (!v.name.trim()) throw new Error("A name is required");
-        const body = { name: v.name, lot_id: v.lot_id, category: v.category, system: v.system, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
+        const body = { name: v.name, lot_id: v.lot_id, category: v.category, system: v.system, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes, public: v.public === "1", blurb: v.blurb };
         if (!item || v.status !== item.status) body.status = v.status;  // an unchanged "sold" would be refused by the API
         if (item) await api("/items/" + encodeURIComponent(item.id), "PUT", body); else await api("/items", "POST", body);
         toast(item ? "Saved" : "Item added", "success"); await refresh();
+      },
+    });
+    const photos = item ? mountPhotos(item.id) : null;
+    await done;
+    if (photos) photos.dispose();
+  }
+
+  async function publishDialog() {
+    let p;
+    try { p = await api("/publish/preview"); } catch (e) { toast(e.message || String(e), "error"); return; }
+    let published = false;
+    await dialog({
+      title: "Publish the site catalog", submit: "Publish " + p.count + " item" + (p.count === 1 ? "" : "s"),
+      body: previewHtml(p),
+      onSubmit: async (v, form) => {
+        if (published) return false;
+        if (!p.site_dir_ok) throw new Error(p.site_dir_problem || "Set the site directory first");
+        const r = await kit.apiFetch(API + "/publish", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hash: p.hash }) });
+        let data = null; try { data = await r.json(); } catch (e) { data = null; }
+        if (r.status === 409) { toast("The inventory changed since this preview. Here is the new one.", "warning"); setTimeout(publishDialog, 0); return true; }
+        if (!r.ok) throw new Error((data && data.detail) || (r.status + " " + r.statusText));
+        published = true;
+        $("#dlg-result", form).textContent = publishResultText(data);
+        const warn = data.push_error || data.git_error;
+        toast(warn ? "Published, but git reported a problem" : "Published " + data.count + " item" + (data.count === 1 ? "" : "s"), warn ? "warning" : "success");
+        return false;  // keep it open so the result is readable
       },
     });
   }
@@ -487,6 +616,7 @@ PAGE = r"""<!doctype html>
   $("#btn-item").addEventListener("click", () => itemDialog(null));
   $("#btn-lot").addEventListener("click", () => lotDialog(null));
   $("#btn-import").addEventListener("click", importDialog);
+  $("#btn-publish").addEventListener("click", publishDialog);
   $("#btn-export").addEventListener("click", exportCsv);
   $("#f-lot").addEventListener("change", (e) => { state.filters.lot = e.target.value; refresh(); });
   $("#f-status").addEventListener("change", (e) => { state.filters.status = e.target.value; refresh(); });

@@ -6,6 +6,8 @@ from __future__ import annotations
 import contextlib
 import logging
 
+from fastapi import Request  # module level: FastAPI resolves the (postponed) annotation from these globals
+
 from .store import InventoryError, InventoryStore, normalize_status
 
 #: Target fields never travel through the generic item write — they need a basis (POST /price).
@@ -18,7 +20,10 @@ ACTOR = "console"
 
 def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: None):
     from fastapi import APIRouter, HTTPException, Query
-    from fastapi.responses import PlainTextResponse
+    from fastapi.responses import FileResponse, PlainTextResponse
+    from starlette.concurrency import run_in_threadpool
+
+    from .photos import MAX_BYTES
 
     r = APIRouter()
 
@@ -140,6 +145,89 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             raise HTTPException(status_code=404, detail=f"no item {item_id!r}")
         emit("item.changed", {"id": item_id, "action": "delete"})
         return {"ok": True}
+
+    # ── photos ── the page uploads the File itself as the body (kit.apiFetch passes a Blob
+    # through untouched), with its type in Content-Type and the alt text in ?alt=.
+    def _need_item(item_id: str) -> None:
+        if store.get_item_row(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"no item {item_id!r}")
+
+    @r.get("/items/{item_id}/photos")
+    async def _photos(item_id: str) -> dict:
+        _need_item(item_id)
+        return {"photos": store.list_photos(item_id)}
+
+    @r.post("/items/{item_id}/photos")
+    async def _add_photo(item_id: str, request: Request, alt: str = "") -> dict:
+        _need_item(item_id)
+        too_big = f"photos are capped at {MAX_BYTES // (1024 * 1024)} MB"
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail=too_big)
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > MAX_BYTES:
+                raise HTTPException(status_code=413, detail=too_big)
+        try:  # sniff + sanitize (+ a HEIC conversion) off the event loop
+            photo = await run_in_threadpool(store.add_photo, item_id, bytes(buf), alt=alt, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "photo_added"})
+        return {"photo": photo}
+
+    @r.get("/items/{item_id}/photos/{photo_id}")
+    async def _photo_bytes(item_id: str, photo_id: str):
+        found = store.photo_file(item_id, photo_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"no photo {photo_id!r} on item {item_id!r}")
+        path, content_type = found
+        return FileResponse(
+            path,
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @r.patch("/items/{item_id}/photos/{photo_id}")
+    async def _patch_photo(item_id: str, photo_id: str, body: dict) -> dict:
+        try:
+            photo = store.update_photo(
+                item_id, photo_id, alt=body.get("alt"), position=body.get("position"), actor=ACTOR
+            )
+        except InventoryError as exc:
+            if str(exc).startswith("no photo"):
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "photo_updated"})
+        return {"photo": photo}
+
+    @r.delete("/items/{item_id}/photos/{photo_id}")
+    async def _delete_photo(item_id: str, photo_id: str) -> dict:
+        if not store.delete_photo(item_id, photo_id, actor=ACTOR):
+            raise HTTPException(status_code=404, detail=f"no photo {photo_id!r} on item {item_id!r}")
+        emit("item.changed", {"id": item_id, "action": "photo_deleted"})
+        return {"ok": True}
+
+    # ── the public site ── sync handlers: they read and write files (and run git), so
+    # FastAPI runs them in its threadpool instead of on the event loop.
+    @r.get("/publish/preview")
+    def _publish_preview() -> dict:
+        from .publish import preview
+
+        return preview(store, cfg)
+
+    @r.post("/publish")
+    def _publish(body: dict) -> dict:
+        from .publish import PublishConflict, publish
+
+        try:
+            out = publish(store, cfg, str(body.get("hash") or ""), actor=ACTOR)
+        except PublishConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except InventoryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        emit("published", {"count": out["count"], "commit": out["commit"], "pushed": out["pushed"]})
+        return out
 
     @r.post("/items/{item_id}/price")
     async def _price(item_id: str, body: dict) -> dict:

@@ -64,6 +64,19 @@ When `weekly_review: true` is set in the plugin config, the host scheduler runs 
 this routine as an automated turn on `weekly_review_cron` (default Monday 09:00). It uses
 the same tools and the same rules; the only thing it never does is touch a listing.
 
+## Photos and the public site
+
+- `inventory_add_photo(item_id, path, alt)` attaches a photo from the workspace. Metadata
+  (location, camera) is stripped on the way in. The first photo is the cover. Write alt
+  text that says what is in the picture ("Griff Oberwald miniature, front view, unpainted").
+- `inventory_upsert_item(..., public=True, blurb="…")` marks an item for the site catalog.
+  The blurb is what a buyer reads: one or two plain sentences about the piece and its
+  condition. Never put cost, lot, where it came from or anything from `notes` in a blurb.
+- `inventory_publish_preview()` shows what the catalog would contain, what changed since the
+  last publish, and which public items are left out and why (no price, not for sale).
+- **You never publish.** There is no publish tool. Tell the operator what is ready and that
+  the Publish button is in the Inventory view; they review the diff and press it.
+
 ## Importing a spreadsheet
 
 `inventory_import_csv(path=…)` maps common headers itself and reports `mapped_columns`,

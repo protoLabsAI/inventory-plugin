@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 
+from .photos import MAX_BYTES
 from .store import STATUSES, InventoryError, InventoryStore, normalize_status
 
 log = logging.getLogger("protoagent.plugins.inventory")
@@ -126,8 +127,10 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         cost_basis: float | None = None,
         retail: float | None = None,
         notes: str = "",
+        public: bool | None = None,
+        blurb: str = "",
     ) -> str:
-        """Create an item (leave `id` blank to mint one) or update fields on an existing one — only the fields you pass change. `system` is the game system (Warhammer 40K, Blood Bowl, …), optional but worth setting: lists and copied Markdown group by it. Targets/prices are NOT set here: use inventory_set_price so the evidence is recorded with them. Status is one of planned, available, listed, pending, sold, kept, withdrawn (planned = exists once a sealed box is split); to record a sale use inventory_mark_sold instead of setting status=sold."""
+        """Create an item (leave `id` blank to mint one) or update fields on an existing one — only the fields you pass change. `system` is the game system (Warhammer 40K, Blood Bowl, …), optional but worth setting: lists and copied Markdown group by it. `public` marks the item for the public site catalog and `blurb` is its short public description (one or two plain sentences a buyer reads; never cost, lot or private notes) — marking it public does not publish anything: the operator reviews and publishes from the Inventory view. Targets/prices are NOT set here: use inventory_set_price so the evidence is recorded with them. Status is one of planned, available, listed, pending, sold, kept, withdrawn (planned = exists once a sealed box is split); to record a sale use inventory_mark_sold instead of setting status=sold."""
         data: dict = {}
         if id:
             data["id"] = id
@@ -139,10 +142,12 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
             ("condition", condition),
             ("status", status),
             ("notes", notes),
+            ("blurb", blurb),
         ):
             if v:
                 data[k] = v
         for k, v in (
+            ("public", public),
             ("quantity", quantity),
             ("model_count", model_count),
             ("cost_basis", cost_basis),
@@ -321,6 +326,37 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         )
 
     @tool
+    def inventory_add_photo(item_id: str, path: str, alt: str = "") -> str:
+        """Attach a photo file (JPEG, PNG, WebP, or HEIC on a Mac) from the agent workspace to an item. Location, camera and other metadata are stripped on the way in. The first photo is the item's cover on the public site. `alt` describes the photo for people using screen readers, e.g. "Griff Oberwald miniature, front view, unpainted"."""
+        try:
+            p = resolve_workspace_path(cfg, path)
+            if not p.is_file():
+                return _err(InventoryError(f"no file at {path!r}"))
+            if p.stat().st_size > MAX_BYTES:
+                return _err(InventoryError(f"photos are capped at {MAX_BYTES // (1024 * 1024)} MB"))
+            photo = store.add_photo(item_id, p.read_bytes(), alt=alt, actor=ACTOR)
+            emit("item.changed", {"id": item_id, "action": "photo_added"})
+            return json.dumps({"ok": True, "photo": photo})
+        except (OSError, InventoryError) as exc:
+            return _err(exc)
+
+    @tool
+    def inventory_publish_preview() -> str:
+        """Preview the public site catalog as it would be published right now: how many items, which were added, removed or changed since the last publish, and which public items are left out and why (no price, not for sale). READ-ONLY — there is no publish tool: only the operator publishes, from the Inventory view. Use it to tell the operator what is ready and what still needs a price, photos or a blurb."""
+        from .publish import preview
+
+        try:
+            out = preview(store, cfg)
+        except (OSError, InventoryError) as exc:
+            return _err(exc)
+        out.pop("hash", None)  # the publish token stays with the operator's page
+        out["items_preview"] = [
+            {"id": e["id"], "name": e["name"], "price": e["price_cents"] / 100, "photos": len(e["photos"])}
+            for e in out["items_preview"]
+        ]
+        return json.dumps(out)
+
+    @tool
     def inventory_stale(listed_days: int = 14, price_days: int = 30) -> str:
         """What needs attention: listings live longer than `listed_days`, and unsold items whose price evidence is older than `price_days` or missing. The weekly-review starting point."""
         return json.dumps({"ok": True, **store.stale(listed_days=listed_days, price_days=price_days)})
@@ -338,6 +374,8 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_import_csv,
         inventory_export_csv,
         inventory_reprice_plan,
+        inventory_add_photo,
+        inventory_publish_preview,
         inventory_stale,
     ]
 

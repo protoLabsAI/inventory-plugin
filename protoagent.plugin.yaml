@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.4.2
+version: 0.5.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -12,8 +12,13 @@ description: >-
   set price with evidence, mark sold, listings, CSV import/export, stale review, re-price
   plan), an optional weekly-review job on the host scheduler, a console rail view (a grid with inline edits, price / sold / listing dialogs, CSV
   import/export, lots, sales and an activity log) and a bearer-gated JSON API under
-  /api/plugins/inventory. Money is stored as integer cents and exposed as dollars. Ships
-  DISABLED; enable with `plugins: { enabled: [inventory] }`.
+  /api/plugins/inventory. Money is stored as integer cents and exposed as dollars.
+
+  Photos (stripped of location and camera metadata on upload) and a public catalog: items
+  marked public are written — through a field allowlist, only when the operator presses
+  Publish in the view — into a static site checkout as src/data/catalog.json plus their
+  photos, then committed and pushed. The agent can preview a publish but never publish.
+  Ships DISABLED; enable with `plugins: { enabled: [inventory] }`.
 enabled: false
 repository: https://github.com/protoLabsAI/inventory-plugin
 min_protoagent_version: "0.148.0"   # sdk.plugin_store (the instance-scoped store) first shipped in 0.148
@@ -37,6 +42,12 @@ config:
   review_max_items: 15              # re-price at most this many items per run (eBay pacing)
   stale_listing_days: 14            # a live listing older than this is reported
   stale_price_days: 30              # price evidence older than this is re-checked
+  # ── Public site ── Publish (the operator's button in the view; never the agent) writes
+  # src/data/catalog.json and src/assets/catalog/ in this site checkout — nothing else —
+  # then commits those two paths and pushes, so the site's CI deploys. Blank = preview only.
+  site_dir: ""
+  publish_git: true                 # commit the catalog + photos after a publish
+  publish_push: true                # and push that commit (a failed push is reported, never fatal)
 
 # Console view (ADR 0026): a left-rail icon whose panel iframes the page this plugin
 # serves at `path` (public prefix); its data comes through /api/plugins/inventory (gated).
@@ -52,6 +63,9 @@ settings:
   - { key: review_max_items, label: "Items re-priced per run", type: number, description: "Caps eBay searches per review run; the rest wait for the next one." }
   - { key: stale_listing_days, label: "Stale listing (days)", type: number, description: "A live listing older than this is reported in the review." }
   - { key: stale_price_days, label: "Stale price (days)", type: number, description: "Price evidence older than this is re-checked in the review." }
+  - { key: site_dir, label: "Site directory", type: path, path_kind: dir, description: "The checkout of the public site. Publish writes src/data/catalog.json and src/assets/catalog/ there, nothing else." }
+  - { key: publish_git, label: "Commit on publish", type: bool, description: "Commit the catalog and photos in the site checkout after a publish." }
+  - { key: publish_push, label: "Push on publish", type: bool, description: "Push that commit so the site's CI deploys it. A failed push is reported; the files and the commit stay." }
 
 # Event bus (ADR 0039): the topics this plugin publishes.
 emits:
@@ -59,8 +73,9 @@ emits:
   - { topic: inventory.lot.changed, summary: "a lot was created, updated or deleted ({id})" }
   - { topic: inventory.sale.recorded, summary: "a sale was recorded ({item_id, sale_id, net, channel})" }
   - { topic: inventory.imported, summary: "a CSV was imported ({kind, created, updated})" }
+  - { topic: inventory.published, summary: "the operator published the public catalog ({count, commit, pushed})" }
 subscribes: []
 
 capabilities:
   network: []
-  filesystem: scoped   # its own SQLite file + CSVs the operator names
+  filesystem: scoped   # its own SQLite file + photo store, CSVs the operator names, and on Publish the site checkout's catalog paths

@@ -20,7 +20,9 @@ import contextlib
 import json
 import logging
 import math
+import os
 import re
+import shutil
 import sqlite3
 import threading
 import uuid
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS items (
   lot_id TEXT NOT NULL DEFAULT '',
   category TEXT NOT NULL DEFAULT '',
   system TEXT NOT NULL DEFAULT '',
+  public INTEGER NOT NULL DEFAULT 0,
+  blurb TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   condition TEXT NOT NULL DEFAULT '',
   quantity INTEGER NOT NULL DEFAULT 1,
@@ -119,6 +123,16 @@ CREATE TABLE IF NOT EXISTS price_observations (
   notes TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_obs_item ON price_observations(item_id);
+CREATE TABLE IF NOT EXISTS photos (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  ext TEXT NOT NULL,
+  alt TEXT NOT NULL DEFAULT '',
+  position INTEGER NOT NULL,
+  bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_photos_item ON photos(item_id, position);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -134,6 +148,10 @@ CREATE TABLE IF NOT EXISTS audit (
 _MIGRATIONS: list[tuple[str, str, str]] = [
     # 0.4.0 — the game system an item belongs to (Warhammer 40K, Blood Bowl, …), optional.
     ("items", "system", "ALTER TABLE items ADD COLUMN system TEXT NOT NULL DEFAULT ''"),
+    # 0.5.0 — shown on the public site (opt-in, so every existing item stays private), and
+    # the short public description that goes with it.
+    ("items", "public", "ALTER TABLE items ADD COLUMN public INTEGER NOT NULL DEFAULT 0"),
+    ("items", "blurb", "ALTER TABLE items ADD COLUMN blurb TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -248,8 +266,44 @@ def check_id(kind: str, value: str) -> str:
 
 
 _ITEM_MONEY = ("cost_basis", "target_low", "target", "target_high", "retail")
-_ITEM_TEXT = ("lot_id", "category", "system", "name", "condition", "notes", "price_basis", "price_updated_on")
+_ITEM_TEXT = (
+    "lot_id",
+    "category",
+    "system",
+    "name",
+    "condition",
+    "notes",
+    "blurb",
+    "price_basis",
+    "price_updated_on",
+)
 _ITEM_INT = ("quantity", "model_count")
+_ITEM_BOOL = ("public",)
+_TRUE_WORDS = {"true", "yes", "y", "1", "on"}
+_FALSE_WORDS = {"false", "no", "n", "0", "off"}
+#: Photo ids are uuid4 hex — checked before one ever becomes part of a path.
+_PHOTO_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _bool_field(name: str, value) -> int | None:
+    """A yes/no flag from a form, a tool call or a sheet: ``None`` or blank → unset; real
+    bools, 0/1 and the usual words pass; anything else is an error, never a silent no."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | float) and value in (0, 1):
+        return int(value)
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in _TRUE_WORDS:
+        return 1
+    if text in _FALSE_WORDS:
+        return 0
+    raise InventoryError(f"{name} must be yes or no, got {value!r}")
+
+
 _LOT_TEXT = ("name", "description", "acquired_on", "source", "notes")
 
 
@@ -262,6 +316,8 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "system": d["system"],
         "name": d["name"],
         "condition": d["condition"],
+        "public": bool(d.get("public") or 0),
+        "blurb": d.get("blurb") or "",
         "quantity": d["quantity"],
         "model_count": d["model_count"],
         "notes": d["notes"],
@@ -275,7 +331,15 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "price_updated_on": d["price_updated_on"],
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
+        **({"photo_count": d["photo_count"]} if "photo_count" in d else {}),
     }
+
+
+def _photo_row_to_dict(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    d["file"] = f"{d['item_id']}/{d['id']}.{d['ext']}"
+    d["content_type"] = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(d["ext"], "")
+    return d
 
 
 def _lot_row_to_dict(r: sqlite3.Row) -> dict:
@@ -318,6 +382,8 @@ class InventoryStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        #: Uploaded photos live next to the database: ``photos/<item_id>/<photo_id>.<ext>``.
+        self.photos_dir = self.path.parent / "photos"
         with self._read() as con:
             con.executescript(SCHEMA)
             for table, column, ddl in _MIGRATIONS:
@@ -363,6 +429,11 @@ class InventoryStore:
             "INSERT INTO audit(ts, entity, entity_id, action, actor, changes) VALUES (?,?,?,?,?,?)",
             (now_iso(), entity, str(entity_id), action, actor or "", json.dumps(changes or {}, default=str)),
         )
+
+    def record_audit(self, entity: str, entity_id, action: str, actor: str, changes: dict | None = None) -> None:
+        """An audit row for an event that is not a row change (a publish)."""
+        with self._tx() as con:
+            self._audit(con, entity, entity_id, action, actor, changes)
 
     def audit_log(self, limit: int = 100, entity_id: str = "") -> list[dict]:
         with self._read() as con:
@@ -427,6 +498,7 @@ class InventoryStore:
     def delete_lot(self, lot_id: str, *, actor: str = "", cascade: bool = False) -> int:
         """Remove a lot. Refuses while items reference it unless ``cascade`` (which removes them
         too — every removed row is snapshotted into the audit trail)."""
+        ids: list[str] = []
         with self._tx() as con:
             n = con.execute("SELECT COUNT(*) FROM items WHERE lot_id=?", (lot_id,)).fetchone()[0]
             if n and not cascade:
@@ -441,7 +513,10 @@ class InventoryStore:
                 self._audit(
                     con, "lot", lot_id, "delete", actor, {"cascade": cascade, "items": n, "snapshot": dict(row)}
                 )
-            return cur.rowcount
+            deleted = cur.rowcount
+        for iid in ids:  # files only after the rows are gone for good
+            self._remove_photo_dir(iid)
+        return deleted
 
     # ── items ─────────────────────────────────────────────────────────────────
     @staticmethod
@@ -455,6 +530,11 @@ class InventoryStore:
         for k in _ITEM_INT:
             if k in data and data[k] is not None and not (isinstance(data[k], str) and not data[k].strip()):
                 fields[k] = _int_field(k, data[k])
+        for k in _ITEM_BOOL:
+            if k in data:
+                flag = _bool_field(k, data[k])
+                if flag is not None:
+                    fields[k] = flag
         for k in _ITEM_MONEY:
             if k in data:
                 cents = money_field(k, data[k])
@@ -526,6 +606,13 @@ class InventoryStore:
                     (item_id,),
                 )
             ]
+            item["photos"] = [
+                _photo_row_to_dict(r)
+                for r in con.execute(
+                    "SELECT * FROM photos WHERE item_id=? ORDER BY position, created_at, id", (item_id,)
+                )
+            ]
+            item["photo_count"] = len(item["photos"])
         return item
 
     def systems(self) -> list[str]:
@@ -584,7 +671,7 @@ class InventoryStore:
                 "(lower(name) LIKE ? OR lower(notes) LIKE ? OR lower(id) LIKE ? OR lower(category) LIKE ? OR lower(system) LIKE ?)"
             )
             args.extend([like, like, like, like, like])
-        sql = "SELECT * FROM items"
+        sql = "SELECT items.*, (SELECT COUNT(*) FROM photos p WHERE p.item_id=items.id) AS photo_count FROM items"
         if where:
             sql += " WHERE " + " AND ".join(where)
         # Game system first, so the grid and a copied list read system → lot → category.
@@ -606,17 +693,192 @@ class InventoryStore:
             "observations": [
                 dict(r) for r in con.execute("SELECT * FROM price_observations WHERE item_id=?", (item_id,))
             ],
+            "photos": [dict(r) for r in con.execute("SELECT * FROM photos WHERE item_id=?", (item_id,))],
         }
         con.execute("DELETE FROM items WHERE id=?", (item_id,))
         con.execute("DELETE FROM listings WHERE item_id=?", (item_id,))
         con.execute("DELETE FROM sales WHERE item_id=?", (item_id,))
         con.execute("DELETE FROM price_observations WHERE item_id=?", (item_id,))
+        con.execute("DELETE FROM photos WHERE item_id=?", (item_id,))
         InventoryStore._audit(con, "item", item_id, "delete", actor, {"snapshot": snapshot})
         return 1
 
     def delete_item(self, item_id: str, *, actor: str = "") -> int:
         with self._tx() as con:
-            return self._delete_item_rows(con, item_id, actor)
+            n = self._delete_item_rows(con, item_id, actor)
+        if n:  # the photo files go only once the rows are committed away
+            self._remove_photo_dir(item_id)
+        return n
+
+    # ── photos ────────────────────────────────────────────────────────────────
+    def _photo_dir(self, item_id: str) -> Path:
+        """``photos/<item_id>`` — the id is re-checked and the result must sit directly under
+        the photos directory, so no id can steer a write or a delete anywhere else."""
+        folder = self.photos_dir / check_id("item", item_id)
+        if folder.resolve().parent != self.photos_dir.resolve():
+            raise InventoryError(f"item id {item_id!r} does not map to a photo folder")
+        return folder
+
+    def _remove_photo_dir(self, item_id: str) -> None:
+        with contextlib.suppress(InventoryError, OSError):
+            folder = self._photo_dir(item_id)
+            if folder.is_dir() and not folder.is_symlink():
+                shutil.rmtree(folder, ignore_errors=True)
+
+    def add_photo(self, item_id: str, data: bytes, *, alt: str = "", actor: str = "") -> dict:
+        """Store an uploaded photo for an item: sniffed, converted (HEIC → JPEG) and stripped
+        of metadata first (see photos.py), then written to a temp name and renamed into place
+        inside the same transaction as its row and audit entry — a failed write leaves
+        neither a row nor a file behind. New photos go last; position 0 is the cover."""
+        from .photos import PhotoError, prepare_photo
+
+        folder = self._photo_dir(item_id)
+        if self.get_item_row(item_id) is None:
+            raise InventoryError(f"no item {item_id!r}")
+        try:
+            clean, ext = prepare_photo(bytes(data or b""))
+        except PhotoError as exc:
+            raise InventoryError(str(exc)) from exc
+        photo_id = uuid.uuid4().hex
+        folder.mkdir(parents=True, exist_ok=True)
+        final = folder / f"{photo_id}.{ext}"
+        tmp = folder / f".{photo_id}.{ext}.tmp"
+        tmp.write_bytes(clean)
+        try:
+            with self._tx() as con:
+                if con.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+                    raise InventoryError(f"no item {item_id!r}")
+                pos = con.execute(
+                    "SELECT COALESCE(MAX(position) + 1, 0) FROM photos WHERE item_id=?", (item_id,)
+                ).fetchone()[0]
+                ts = now_iso()
+                con.execute(
+                    "INSERT INTO photos(id, item_id, ext, alt, position, bytes, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (photo_id, item_id, ext, str(alt or ""), pos, len(clean), ts),
+                )
+                con.execute("UPDATE items SET updated_at=? WHERE id=?", (ts, item_id))
+                self._audit(
+                    con,
+                    "photo",
+                    photo_id,
+                    "create",
+                    actor,
+                    {"item_id": item_id, "ext": ext, "bytes": len(clean), "alt": str(alt or ""), "position": pos},
+                )
+                os.replace(tmp, final)
+                row = con.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            final.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                folder.rmdir()  # only if this left it empty
+            raise
+        return _photo_row_to_dict(row)
+
+    def get_item_row(self, item_id: str) -> dict | None:
+        with self._read() as con:
+            row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_photos(self, item_id: str) -> list[dict]:
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT * FROM photos WHERE item_id=? ORDER BY position, created_at, id", (item_id,)
+            ).fetchall()
+        return [_photo_row_to_dict(r) for r in rows]
+
+    def photo_file(self, item_id: str, photo_id: str) -> tuple[Path, str] | None:
+        """``(path, content type)`` of a stored photo, or None."""
+        if not _PHOTO_ID_RE.match(str(photo_id or "")):
+            return None
+        with self._read() as con:
+            row = con.execute("SELECT * FROM photos WHERE id=? AND item_id=?", (photo_id, item_id)).fetchone()
+        if row is None:
+            return None
+        d = _photo_row_to_dict(row)
+        try:
+            path = self._photo_dir(item_id) / f"{photo_id}.{d['ext']}"
+        except InventoryError:
+            return None
+        return (path, d["content_type"]) if path.is_file() else None
+
+    @staticmethod
+    def _renumber_photos(con, item_id: str, order: list[str]) -> None:
+        for k, pid in enumerate(order):
+            con.execute("UPDATE photos SET position=? WHERE id=?", (k, pid))
+
+    def update_photo(self, item_id: str, photo_id: str, *, alt=None, position=None, actor: str = "") -> dict:
+        """Change a photo's alt text and/or move it (0 = cover); the rest renumber around it."""
+        if not _PHOTO_ID_RE.match(str(photo_id or "")):
+            raise InventoryError(f"no photo {photo_id!r} on item {item_id!r}")
+        with self._tx() as con:
+            row = con.execute("SELECT * FROM photos WHERE id=? AND item_id=?", (photo_id, item_id)).fetchone()
+            if row is None:
+                raise InventoryError(f"no photo {photo_id!r} on item {item_id!r}")
+            changes: dict = {}
+            if alt is not None:
+                con.execute("UPDATE photos SET alt=? WHERE id=?", (str(alt), photo_id))
+                changes["alt"] = str(alt)
+            if position is not None and not (isinstance(position, str) and not position.strip()):
+                order = [
+                    r[0]
+                    for r in con.execute(
+                        "SELECT id FROM photos WHERE item_id=? ORDER BY position, created_at, id", (item_id,)
+                    )
+                ]
+                order.remove(photo_id)
+                pos = max(0, min(_int_field("position", position), len(order)))
+                order.insert(pos, photo_id)
+                self._renumber_photos(con, item_id, order)
+                changes["position"] = pos
+            if changes:
+                con.execute("UPDATE items SET updated_at=? WHERE id=?", (now_iso(), item_id))
+                self._audit(con, "photo", photo_id, "update", actor, {"item_id": item_id, **changes})
+            row = con.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+        return _photo_row_to_dict(row)
+
+    def delete_photo(self, item_id: str, photo_id: str, *, actor: str = "") -> int:
+        """Remove a photo: the row (and a renumber) in one transaction, the file after commit."""
+        if not _PHOTO_ID_RE.match(str(photo_id or "")):
+            return 0
+        with self._tx() as con:
+            row = con.execute("SELECT * FROM photos WHERE id=? AND item_id=?", (photo_id, item_id)).fetchone()
+            if row is None:
+                return 0
+            con.execute("DELETE FROM photos WHERE id=?", (photo_id,))
+            order = [
+                r[0]
+                for r in con.execute(
+                    "SELECT id FROM photos WHERE item_id=? ORDER BY position, created_at, id", (item_id,)
+                )
+            ]
+            self._renumber_photos(con, item_id, order)
+            con.execute("UPDATE items SET updated_at=? WHERE id=?", (now_iso(), item_id))
+            self._audit(con, "photo", photo_id, "delete", actor, {"item_id": item_id, "snapshot": dict(row)})
+        with contextlib.suppress(InventoryError, OSError):
+            (self._photo_dir(item_id) / f"{photo_id}.{row['ext']}").unlink(missing_ok=True)
+        return 1
+
+    def publish_source(self) -> list[dict]:
+        """Every item marked public, each with its photos (in order) and live listings — read
+        in ONE transaction so the snapshot is consistent. Raw rows: publish.py decides what
+        (little) of this leaves the building."""
+        with self._read() as con:
+            con.execute("BEGIN")
+            try:
+                items = [dict(r) for r in con.execute("SELECT * FROM items WHERE public=1")]
+                photos: dict[str, list[dict]] = {}
+                for r in con.execute("SELECT * FROM photos ORDER BY item_id, position, created_at, id"):
+                    photos.setdefault(r["item_id"], []).append(dict(r))
+                listings: dict[str, list[dict]] = {}
+                for r in con.execute("SELECT * FROM listings WHERE state='active' ORDER BY id"):
+                    listings.setdefault(r["item_id"], []).append(dict(r))
+            finally:
+                con.rollback()
+        for it in items:
+            it["photos"] = photos.get(it["id"], [])
+            it["listings"] = listings.get(it["id"], [])
+        return items
 
     # ── pricing ───────────────────────────────────────────────────────────────
     @staticmethod

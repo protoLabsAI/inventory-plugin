@@ -14,11 +14,11 @@ inventory_summary()
 
 | | |
 |---|---|
-| **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_reprice_plan` · `inventory_stale` |
-| **View** | a rail panel: the item grid (double-click to edit name/category/condition/qty; status select; click a price for the Price dialog), Price / Sold / Listing / Edit / Delete per row, an optional **game system** per item (filter, ordering, inline edit with suggestions), multi-select with **Copy list** (also ⌘C) — a for-sale post per game system: the system as a header, then `Name NoS — $20` per line (condition inline, whole-dollar prices), lots with their P&L, sales, an activity log, CSV import (file or paste, with the mapping report) and export |
-| **API** | bearer-gated JSON under `/api/plugins/inventory` — `summary`, `lots`, `items`, `items/{id}/price`, `items/{id}/sold`, `items/{id}/listings`, `listings/{id}/end`, `sales`, `stale`, `audit`, `import`, `export` |
+| **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_reprice_plan` · `inventory_add_photo` · `inventory_publish_preview` · `inventory_stale` — there is deliberately **no publish tool** |
+| **View** | a rail panel: the item grid (double-click to edit name/category/condition/qty; status select; click a price for the Price dialog), Price / Sold / Listing / Edit / Delete per row, an optional **game system** per item (filter, ordering, inline edit with suggestions), multi-select with **Copy list** (also ⌘C) — a for-sale post per game system: the system as a header, then `Name NoS — $20` per line (condition inline, whole-dollar prices), lots with their P&L, sales, an activity log, CSV import (file or paste, with the mapping report) and export; per item a **Show on the public site** flag, a public **blurb** and **photos** (upload from the Edit dialog, alt text, make cover, delete); a **Publish** button that previews the site catalog diff and publishes it |
+| **API** | bearer-gated JSON under `/api/plugins/inventory` — `summary`, `lots`, `items`, `items/{id}/price`, `items/{id}/sold`, `items/{id}/listings`, `listings/{id}/end`, `sales`, `stale`, `audit`, `import`, `export`, `items/{id}/photos` (raw-body upload, list, bytes, PATCH alt/position, DELETE), `publish/preview`, `publish` |
 | **Automations** | `weekly_review: true` arms a plugin-owned recurring turn (`weekly_review_cron`, default Monday 09:00 in `review_timezone`) that re-prices stale evidence from eBay sold comps through the same tools, reports stale listings with a recommendation (it never changes a listing itself), and posts the per-lot P&L. Cancelled when the plugin is disabled. |
-| **Events** | `inventory.item.changed`, `inventory.lot.changed`, `inventory.sale.recorded`, `inventory.imported` |
+| **Events** | `inventory.item.changed`, `inventory.lot.changed`, `inventory.sale.recorded`, `inventory.imported`, `inventory.published` |
 | **Skill** | `inventory-ops` — the rules (a target needs a basis; never set sold by hand; sold ≠ active ≠ retail) and the re-price / weekly-review routines |
 
 ## The model
@@ -32,6 +32,30 @@ inventory_summary()
 - **Audit** — every mutation, with the actor (`agent` or `console`) and the fields that changed.
 
 Money is stored as integer cents and exposed as dollars.
+
+## Photos and the public site
+
+- **Photos** are sniffed by their bytes (JPEG, PNG, WebP; HEIC/HEIF is converted to JPEG with
+  macOS `sips`), capped at 20 MB, and **stripped of metadata on upload** — EXIF (GPS, camera,
+  serial), XMP, IPTC, comments, and anything after a JPEG's end-of-image marker. Only the
+  EXIF Orientation survives, so phone photos still display upright. Pure Python, no Pillow.
+  Stored next to the database as `photos/<item_id>/<photo_id>.<ext>`; position 0 is the cover.
+- **Public** is opt-in per item. **Publish** (the view's button — the agent can only preview)
+  builds `src/data/catalog.json` in the `site_dir` checkout from an allowlist of fields —
+  `id, name, system, category, condition, price_cents, quantity, status, blurb, photos, links,
+  updated` — for items that are public, available or listed, priced, and in stock. Cost,
+  lot, notes, the low/high band, retail, price basis, sales and the audit log never leave.
+- The preview carries a hash of exactly what it showed; Publish refuses (409) if the
+  inventory moved since. It mirrors the photos into `src/assets/catalog/` (only inside that
+  folder), commits the two paths (`git commit --only`, so nothing else you staged rides
+  along) and pushes. A failed push is reported; the files and the commit stay.
+
+```yaml
+inventory:
+  site_dir: /path/to/nerdsville-site   # the site checkout; blank = preview only
+  publish_git: true                    # commit catalog + photos after a publish
+  publish_push: true                   # push so the site's CI deploys
+```
 
 ## Setup
 
