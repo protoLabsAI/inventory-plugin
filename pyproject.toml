@@ -14,3 +14,6 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repo root on sys.path so tests can share helpers via `from tests.x import ...`
+# under plain `pytest` (CI), not only `python -m pytest`.
+pythonpath = ["."]
