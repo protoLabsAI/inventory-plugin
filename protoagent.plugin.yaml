@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.4.2
+version: 0.5.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -10,8 +10,8 @@ description: >-
 
   Contributes agent tools for every operation (summary/P&L, list, get, upsert lot/item,
   set price with evidence, mark sold, listings, CSV import/export, stale review, re-price
-  plan), an optional weekly-review job on the host scheduler, a console rail view (a grid with inline edits, price / sold / listing dialogs, CSV
-  import/export, lots, sales and an activity log) and a bearer-gated JSON API under
+  plan), an optional weekly-review job on the host scheduler, a console rail view (a work queue, stock and lot P&L tabs, one item drawer with
+  price / sold / listing actions, CSV import/export and a readable history) and a bearer-gated JSON API under
   /api/plugins/inventory. Money is stored as integer cents and exposed as dollars. Ships
   DISABLED; enable with `plugins: { enabled: [inventory] }`.
 enabled: false

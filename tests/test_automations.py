@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from datetime import UTC, datetime, timedelta
 
 import inventory_plugin
 import pytest
@@ -108,7 +109,9 @@ class TestReplan:
 
     def test_plan_orders_oldest_evidence_first_and_caps(self, store):
         store.upsert_lot({"id": "L", "name": "L"}, actor="t")
-        for i, (iid, when) in enumerate((("A", "2026-09-01"), ("B", ""), ("C", "2025-01-01"), ("D", "2026-09-10"))):
+        today = datetime.now(UTC).date()
+        fresh_a, fresh_d = (str(today - timedelta(days=n)) for n in (11, 2))
+        for i, (iid, when) in enumerate((("A", fresh_a), ("B", ""), ("C", "2025-01-01"), ("D", fresh_d))):
             store.upsert_item({"id": iid, "name": f"Item {iid}", "lot_id": "L"}, actor="t")
             if when:
                 store.set_price(iid, target=10 + i, basis="b", observed_on=when, actor="t")
