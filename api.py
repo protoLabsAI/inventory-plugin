@@ -71,12 +71,20 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         category: str = "",
         system: str = "",
         q: str = "",
+        bin_id: str = "",
         limit: int = Query(500, ge=1, le=5000),
         offset: int = Query(0, ge=0),
     ) -> dict:
         try:
             items = store.list_items(
-                lot_id=lot_id, status=status, category=category, system=system, query=q, limit=limit, offset=offset
+                lot_id=lot_id,
+                status=status,
+                category=category,
+                system=system,
+                query=q,
+                bin_id=bin_id,
+                limit=limit,
+                offset=offset,
             )
         except InventoryError as exc:
             _raise(exc)
@@ -220,6 +228,73 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     @r.get("/sales")
     async def _sales(lot_id: str = "", limit: int = Query(500, ge=1, le=5000)) -> dict:
         return {"sales": store.list_sales(lot_id=lot_id, limit=limit)}
+
+    # ── bins + the pick list ──────────────────────────────────────────────────
+    @r.get("/bins")
+    async def _bins() -> dict:
+        return store.list_bins()
+
+    @r.post("/bins")
+    async def _create_bins(body: dict | None = None) -> dict:
+        body = body or {}
+        try:
+            bins = store.create_bins(
+                count=body.get("count") or 1,
+                bin_id=str(body.get("id") or ""),
+                label=str(body.get("label") or ""),
+                note=str(body.get("note") or ""),
+                actor=ACTOR,
+            )
+        except InventoryError as exc:
+            _raise(exc)
+        emit("bin.changed", {"ids": [b["id"] for b in bins], "action": "create"})
+        return {"bins": bins}
+
+    @r.put("/bins/{bin_id}")
+    async def _put_bin(bin_id: str, body: dict) -> dict:
+        try:
+            b = store.update_bin(bin_id, label=body.get("label"), note=body.get("note"), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("bin.changed", {"ids": [b["id"]], "action": "update"})
+        return {"bin": b}
+
+    @r.delete("/bins/{bin_id}")
+    async def _delete_bin(bin_id: str) -> dict:
+        try:
+            n = store.delete_bin(bin_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        if not n:
+            raise HTTPException(status_code=404, detail=f"no bin {bin_id!r}")
+        emit("bin.changed", {"ids": [bin_id.upper()], "action": "delete"})
+        return {"ok": True}
+
+    @r.post("/bins/move")
+    async def _move(body: dict) -> dict:
+        ids = body.get("item_ids")
+        if not isinstance(ids, list):
+            raise HTTPException(status_code=400, detail="item_ids must be a list of item ids")
+        try:
+            out = store.move_items(ids, str(body.get("bin_id") or ""), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        for i in out["moved"]:
+            emit("item.changed", {"id": i, "action": "move", "bin_id": out["bin_id"]})
+        return out
+
+    @r.get("/to-pack")
+    async def _to_pack() -> dict:
+        return {"sales": store.to_pack()}
+
+    @r.post("/sales/{sale_id}/packed")
+    async def _packed(sale_id: int) -> dict:
+        try:
+            sale = store.mark_packed(sale_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("sale.packed", {"sale_id": sale["id"], "item_id": sale["item_id"]})
+        return {"sale": sale}
 
     @r.get("/stale")
     async def _stale(listed_days: int = 14, price_days: int = 30) -> dict:

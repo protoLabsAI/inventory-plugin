@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.5.0
+version: 0.6.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -59,6 +59,8 @@ emits:
   - { topic: inventory.lot.changed, summary: "a lot was created, updated or deleted ({id})" }
   - { topic: inventory.sale.recorded, summary: "a sale was recorded ({item_id, sale_id, net, channel})" }
   - { topic: inventory.imported, summary: "a CSV was imported ({kind, created, updated})" }
+  - { topic: inventory.bin.changed, summary: "bins were created, relabelled or deleted ({ids, action})" }
+  - { topic: inventory.sale.packed, summary: "a sold item was picked and packed ({sale_id, item_id})" }
 subscribes: []
 
 capabilities:

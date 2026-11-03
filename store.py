@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS price_observations (
   notes TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_obs_item ON price_observations(item_id);
+CREATE TABLE IF NOT EXISTS bins (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_on TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -130,11 +138,30 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 """
 
-#: Additive migrations: (table, column, DDL). Applied at connect when the column is missing.
-_MIGRATIONS: list[tuple[str, str, str]] = [
+#: Additive migrations: (table, column, statements). Applied at open when the column is
+#: missing — all statements in ONE transaction, so a column is never added without its
+#: backfill.
+_MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     # 0.4.0 — the game system an item belongs to (Warhammer 40K, Blood Bowl, …), optional.
-    ("items", "system", "ALTER TABLE items ADD COLUMN system TEXT NOT NULL DEFAULT ''"),
+    ("items", "system", ("ALTER TABLE items ADD COLUMN system TEXT NOT NULL DEFAULT ''",)),
+    # 0.6.0 — where an item physically is: a bin id, or '' for not in a bin.
+    ("items", "bin_id", ("ALTER TABLE items ADD COLUMN bin_id TEXT NOT NULL DEFAULT ''",)),
+    # 0.6.0 — when a sale was picked and packed. Every sale that predates bins is history,
+    # already shipped: backfill it as packed so the pick list starts empty.
+    (
+        "sales",
+        "packed_on",
+        (
+            "ALTER TABLE sales ADD COLUMN packed_on TEXT NOT NULL DEFAULT ''",
+            "UPDATE sales SET packed_on = CASE WHEN sold_on != '' THEN sold_on ELSE date('now') END",
+        ),
+    ),
 ]
+_POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
+
+#: A bin id is printed on a label: B01, B02 … (any id-safe text is accepted; minted ids
+#: follow this pattern).
+_BIN_SEQ_RE = re.compile(r"^B(\d+)$")
 
 
 class InventoryError(ValueError):
@@ -273,6 +300,7 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "retail": dollars(d["retail_cents"]),
         "price_basis": d["price_basis"],
         "price_updated_on": d["price_updated_on"],
+        "bin_id": d.get("bin_id") or "",
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
@@ -320,10 +348,14 @@ class InventoryStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._read() as con:
             con.executescript(SCHEMA)
-            for table, column, ddl in _MIGRATIONS:
+        for table, column, statements in _MIGRATIONS:
+            with self._tx() as con:
                 cols = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
-                if column not in cols:
-                    con.execute(ddl)
+                if column not in cols:  # re-checked under the write lock: another process may have won
+                    for sql in statements:
+                        con.execute(sql)
+        with self._read() as con:
+            con.executescript(_POST_MIGRATION)
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=10, isolation_level=None)  # autocommit; we BEGIN explicitly
@@ -558,10 +590,17 @@ class InventoryStore:
         category: str = "",
         system: str = "",
         query: str = "",
+        bin_id: str = "",
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict]:
+        """``bin_id``: one bin, or ``"-"`` for items not in any bin; blank = any."""
         where, args = [], []
+        if bin_id == "-":
+            where.append("bin_id=''")
+        elif bin_id:
+            where.append("bin_id=?")
+            args.append(bin_id.strip().upper())
         if system:
             where.append("lower(system)=lower(?)")
             args.append(system)
@@ -581,9 +620,10 @@ class InventoryStore:
         if query:
             like = f"%{query.lower()}%"
             where.append(
-                "(lower(name) LIKE ? OR lower(notes) LIKE ? OR lower(id) LIKE ? OR lower(category) LIKE ? OR lower(system) LIKE ?)"
+                "(lower(name) LIKE ? OR lower(notes) LIKE ? OR lower(id) LIKE ? OR lower(category) LIKE ? "
+                "OR lower(system) LIKE ? OR lower(bin_id) LIKE ?)"
             )
-            args.extend([like, like, like, like, like])
+            args.extend([like, like, like, like, like, like])
         sql = "SELECT * FROM items"
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -753,6 +793,7 @@ class InventoryStore:
         notes: str = "",
         actor: str = "",
         force: bool = False,
+        packed: bool = False,
     ) -> dict:
         """Record a sale in one transaction: the sale row, the stock change, the closed
         listings, the audit row. ``net = price + shipping charged − fees − shipping cost``.
@@ -760,7 +801,8 @@ class InventoryStore:
         Selling fewer units than the item holds decrements its quantity and leaves it on
         sale; selling the last unit flips it to ``sold`` and closes every live listing. An
         item that is already sold (or kept/withdrawn) is refused unless ``force`` — a retried
-        tool call must not double the realized revenue."""
+        tool call must not double the realized revenue. ``packed`` records the sale as already
+        picked (a sheet import of history); otherwise it waits on the pick list."""
         price_c = money_field("price", price)
         if price_c is None or price_c is _UNSET:
             raise InventoryError("a sale needs a price")
@@ -792,8 +834,20 @@ class InventoryStore:
             remaining = max(0, int(row["quantity"] or 1) - qty)
             cur = con.execute(
                 "INSERT INTO sales(item_id, channel, sold_on, price_cents, shipping_charged_cents, fees_cents, "
-                "shipping_cost_cents, net_cents, quantity, notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (item_id, channel, sold_on or today_iso(), price_c, ship_in_c, fees_c, ship_out_c, net_c, qty, notes),
+                "shipping_cost_cents, net_cents, quantity, notes, packed_on) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    item_id,
+                    channel,
+                    sold_on or today_iso(),
+                    price_c,
+                    ship_in_c,
+                    fees_c,
+                    ship_out_c,
+                    net_c,
+                    qty,
+                    notes,
+                    (sold_on or today_iso()) if packed else "",
+                ),
             )
             ts = now_iso()
             if remaining > 0:
@@ -836,6 +890,154 @@ class InventoryStore:
             else:
                 rows = con.execute("SELECT * FROM sales ORDER BY sold_on DESC, id DESC LIMIT ?", (limit,)).fetchall()
         return [_sale_row_to_dict(r) for r in rows]
+
+    # ── bins: where an item physically is ─────────────────────────────────────
+    @staticmethod
+    def _bin_id(value) -> str:
+        return check_id("bin", str(value or "").strip().upper())
+
+    @staticmethod
+    def _next_bin_ids(con, n: int) -> list[str]:
+        used = {r[0] for r in con.execute("SELECT id FROM bins")}
+        top = max((int(m.group(1)) for b in used if (m := _BIN_SEQ_RE.match(b))), default=0)
+        return [f"B{k:02d}" for k in range(top + 1, top + 1 + n)]
+
+    def create_bins(
+        self, *, count: int = 1, bin_id: str = "", label: str = "", note: str = "", actor: str = ""
+    ) -> list[dict]:
+        """Make bins. ``bin_id`` names one; otherwise ``count`` new ids continue the B01, B02 …
+        sequence. ``label`` / ``note`` apply to each new bin. An existing id is refused."""
+        count = _int_field("count", count if count not in (None, "") else 1)
+        if bin_id and count != 1:
+            raise InventoryError("name one bin, or ask for a count of new ones — not both")
+        if not 1 <= count <= 200:
+            raise InventoryError("make between 1 and 200 bins at a time")
+        with self._tx() as con:
+            ids = [self._bin_id(bin_id)] if bin_id else self._next_bin_ids(con, count)
+            ts, today = now_iso(), today_iso()
+            for b in ids:
+                if con.execute("SELECT 1 FROM bins WHERE id=?", (b,)).fetchone():
+                    raise InventoryError(f"bin {b!r} already exists")
+                con.execute(
+                    "INSERT INTO bins(id, label, note, created_on, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                    (b, str(label or ""), str(note or ""), today, ts, ts),
+                )
+                self._audit(con, "bin", b, "create", actor, {"label": label or "", "note": note or ""})
+            rows = con.execute(f"SELECT * FROM bins WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        order = {b: i for i, b in enumerate(ids)}
+        return sorted((dict(r) for r in rows), key=lambda r: order[r["id"]])
+
+    def update_bin(self, bin_id: str, *, label=None, note=None, actor: str = "") -> dict:
+        bin_id = self._bin_id(bin_id)
+        fields = {k: str(v) for k, v in (("label", label), ("note", note)) if v is not None}
+        with self._tx() as con:
+            if con.execute("SELECT 1 FROM bins WHERE id=?", (bin_id,)).fetchone() is None:
+                raise InventoryError(f"no bin {bin_id!r}")
+            if fields:
+                sets = ", ".join(f"{k}=?" for k in fields)
+                con.execute(f"UPDATE bins SET {sets}, updated_at=? WHERE id=?", [*fields.values(), now_iso(), bin_id])
+                self._audit(con, "bin", bin_id, "update", actor, fields)
+            return dict(con.execute("SELECT * FROM bins WHERE id=?", (bin_id,)).fetchone())
+
+    def delete_bin(self, bin_id: str, *, actor: str = "") -> int:
+        """Remove an EMPTY bin. A bin with items in it is refused — move them first."""
+        bin_id = self._bin_id(bin_id)
+        with self._tx() as con:
+            n = con.execute("SELECT COUNT(*) FROM items WHERE bin_id=?", (bin_id,)).fetchone()[0]
+            if n:
+                raise InventoryError(f"bin {bin_id!r} still holds {n} item(s); move them out first")
+            row = con.execute("SELECT * FROM bins WHERE id=?", (bin_id,)).fetchone()
+            if row is None:
+                return 0
+            con.execute("DELETE FROM bins WHERE id=?", (bin_id,))
+            self._audit(con, "bin", bin_id, "delete", actor, {"snapshot": dict(row)})
+            return 1
+
+    def list_bins(self) -> dict:
+        """Every bin with what is in it (count of items, and the unsold value at target), plus
+        how many unsold items are in no bin at all."""
+        with self._read() as con:
+            bins = [dict(r) for r in con.execute("SELECT * FROM bins ORDER BY id")]
+            stats = {
+                r["bin_id"]: r
+                for r in con.execute(
+                    "SELECT bin_id, COUNT(*) AS n, "
+                    f"SUM(CASE WHEN status IN ({','.join('?' * len(UNSOLD))}) THEN COALESCE(target_cents, 0) * "
+                    "MAX(quantity, 1) ELSE 0 END) AS value FROM items WHERE bin_id != '' GROUP BY bin_id",
+                    UNSOLD,
+                )
+            }
+            unbinned = con.execute(
+                f"SELECT COUNT(*) FROM items WHERE bin_id='' AND status IN ({','.join('?' * len(UNSOLD))})", UNSOLD
+            ).fetchone()[0]
+        for b in bins:
+            s = stats.get(b["id"])
+            b["items"] = s["n"] if s else 0
+            b["value_at_target"] = dollars(s["value"] if s else 0)
+        return {"bins": bins, "unbinned_unsold": unbinned}
+
+    def move_items(self, item_ids, bin_id: str, *, actor: str = "") -> dict:
+        """Put items in ``bin_id`` ('' = take them out of any bin). All or nothing: an unknown
+        item or bin refuses the whole move. Each item that actually moves gets an audit row
+        with ``{"bin": [from, to]}``."""
+        if isinstance(item_ids, str):
+            item_ids = [item_ids]
+        ids = list(dict.fromkeys(str(i).strip() for i in (item_ids or []) if str(i).strip()))
+        if not ids:
+            raise InventoryError("name at least one item to move")
+        target = self._bin_id(bin_id) if str(bin_id or "").strip() else ""
+        moved = []
+        with self._tx() as con:
+            if target and con.execute("SELECT 1 FROM bins WHERE id=?", (target,)).fetchone() is None:
+                raise InventoryError(f"no bin {target!r}; create it first")
+            rows = {
+                r["id"]: r
+                for r in con.execute(f"SELECT id, bin_id FROM items WHERE id IN ({','.join('?' * len(ids))})", ids)
+            }
+            missing = [i for i in ids if i not in rows]
+            if missing:
+                raise InventoryError(f"no item(s) {', '.join(repr(m) for m in missing)}")
+            ts = now_iso()
+            for i in ids:
+                was = rows[i]["bin_id"] or ""
+                if was == target:
+                    continue
+                con.execute("UPDATE items SET bin_id=?, updated_at=? WHERE id=?", (target, ts, i))
+                self._audit(con, "item", i, "move", actor, {"bin": [was, target]})
+                moved.append(i)
+        return {"bin_id": target, "moved": moved, "unchanged": [i for i in ids if i not in moved]}
+
+    def to_pack(self) -> list[dict]:
+        """The pick list: every sale not yet packed, with the item's name and the bin to pull
+        it from ('' when none was recorded), grouped by bin then oldest sale first."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT s.*, i.name AS item_name, i.bin_id AS bin_id, i.condition AS item_condition "
+                "FROM sales s JOIN items i ON i.id = s.item_id WHERE s.packed_on = '' "
+                "ORDER BY i.bin_id = '', i.bin_id, s.sold_on, s.id"
+            ).fetchall()
+        return [_sale_row_to_dict(r) for r in rows]
+
+    def mark_packed(self, sale_id: int, *, actor: str = "") -> dict:
+        """Tick a sale off the pick list. When the item has no stock left (status sold) it has
+        left its bin, so its bin is cleared — audited as a move."""
+        with self._tx() as con:
+            sale = con.execute("SELECT * FROM sales WHERE id=?", (int(sale_id),)).fetchone()
+            if sale is None:
+                raise InventoryError(f"no sale {sale_id}")
+            if sale["packed_on"]:
+                raise InventoryError(f"sale {sale_id} was already packed on {sale['packed_on']}")
+            today = today_iso()
+            con.execute("UPDATE sales SET packed_on=? WHERE id=?", (today, sale["id"]))
+            self._audit(con, "sale", sale["id"], "packed", actor, {"item_id": sale["item_id"]})
+            item = con.execute("SELECT status, bin_id FROM items WHERE id=?", (sale["item_id"],)).fetchone()
+            if item is not None and item["status"] == "sold" and item["bin_id"]:
+                con.execute("UPDATE items SET bin_id='', updated_at=? WHERE id=?", (now_iso(), sale["item_id"]))
+                self._audit(
+                    con, "item", sale["item_id"], "move", actor, {"bin": [item["bin_id"], ""], "reason": "packed"}
+                )
+            out = con.execute("SELECT * FROM sales WHERE id=?", (sale["id"],)).fetchone()
+        return _sale_row_to_dict(out)
 
     # ── roll-ups ──────────────────────────────────────────────────────────────
     def summary(self, lot_id: str = "") -> dict:

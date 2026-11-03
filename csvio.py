@@ -40,6 +40,7 @@ ITEM_ALIASES: dict[str, tuple[str, ...]] = {
     "sold_price": ("sold_price_usd", "sold_price", "sold_for"),
     "sold_channel": ("sold_channel", "channel"),
     "sold_on": ("sold_on", "sold_date", "date_sold"),
+    "bin_id": ("bin_id", "bin", "location"),
 }
 LOT_ALIASES: dict[str, tuple[str, ...]] = {
     "id": ("lot_id", "id"),
@@ -105,6 +106,7 @@ ITEM_EXPORT_COLUMNS = (
     "cost_basis",
     "price_basis",
     "price_updated_on",
+    "bin_id",
     "notes",
     "updated_at",
 )
@@ -120,6 +122,7 @@ SALE_EXPORT_COLUMNS = (
     "fees",
     "shipping_cost",
     "net",
+    "packed_on",
     "notes",
 )
 
@@ -193,6 +196,7 @@ def import_csv(store: InventoryStore, text: str, *, kind: str = "auto", actor: s
                 sold_channel = data.pop("sold_channel", "") or "import"
                 sold_on = data.pop("sold_on", "")
                 status_text = data.pop("status", "")
+                bin_text = data.pop("bin_id", "")
                 if not data.get("lot_id") and default_lot:
                     data["lot_id"] = default_lot
                 existing = store.get_item(data["id"]) if data.get("id") else None
@@ -213,6 +217,11 @@ def import_csv(store: InventoryStore, text: str, *, kind: str = "auto", actor: s
                 if note and not existed:
                     data["notes"] = ((data.get("notes") or "").rstrip() + "\n" + note).strip()
                 item = store.upsert_item(data, actor=actor, allow_sold=True)
+                if bin_text:  # blank keeps the item where it is (re-import never clobbers)
+                    try:
+                        store.move_items([item["id"]], bin_text, actor=actor)  # the same audited move
+                    except InventoryError as exc:
+                        warnings.append(f"line {i}: bin not set — {exc}")
                 price_c = to_cents(sold_price) if sold_price else price_in_status
                 if status == "sold" and price_c is not None and not store.get_item(item["id"])["sales"]:
                     store.mark_sold(
@@ -221,6 +230,7 @@ def import_csv(store: InventoryStore, text: str, *, kind: str = "auto", actor: s
                         channel=sold_channel,
                         sold_on=sold_on,
                         notes=f"imported from CSV (status column read {status_text!r})",
+                        packed=True,  # history, already shipped: never on the pick list
                         actor=actor,
                         force=True,  # the row already says sold; record what it sold for
                     )

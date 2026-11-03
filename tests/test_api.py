@@ -58,7 +58,8 @@ def test_crud_flow_over_http(registry):
     assert c.get("/api/plugins/inventory/sales").json()["sales"][0]["net"] == 26.0
     audit = c.get("/api/plugins/inventory/audit").json()["audit"]
     assert audit and all(e["actor"] == "console" for e in audit)
-    assert c.get("/api/plugins/inventory/stale").status_code == 200
+    stale = c.get("/api/plugins/inventory/stale")
+    assert stale.status_code == 200 and set(stale.json()) >= {"stale_listings", "stale_prices"}
     assert c.delete(f"/api/plugins/inventory/items/{iid}").status_code == 200
     assert c.get(f"/api/plugins/inventory/items/{iid}").status_code == 404
     assert c.delete("/api/plugins/inventory/lots/L1").status_code == 200

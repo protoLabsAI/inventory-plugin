@@ -24,6 +24,12 @@ not a note. If a number is not in the inventory, it has not been decided.
 - **Listings** — where an item is up (channel, url, price). `inventory_listing add|end`.
 - **Sales** — what it actually sold for. `inventory_mark_sold` computes
   `net = price + shipping charged − fees − shipping cost` and closes live listings.
+- **Bins** — where an item physically is (B01, B02 …). `inventory_bins` lists, creates,
+  relabels and deletes empty bins; `inventory_move_to_bin` records a move;
+  `inventory_list(bin_id="B03")` shows a bin's contents, `bin_id="-"` the items in no bin.
+- **Pick list** — every sale not yet packed, with the bin to pull it from.
+  `inventory_packing list`, then `inventory_packing packed` once the operator says it is
+  packed (a sold-out item then leaves its bin).
 
 ## Rules
 
@@ -35,7 +41,9 @@ not a note. If a number is not in the inventory, it has not been decided.
    are recorded. The tools refuse the shortcut.
 4. **Money in dollars in tool calls; the store keeps cents.** Do not round yourself.
 5. **Ask before deleting.** `withdrawn` and `kept` exist so the record survives.
-6. **Report with `inventory_summary`.** It is the one place lot cost, remaining value and
+6. **A location is a fact the operator gives you.** Only move an item to a bin when they
+   say they put it there. After recording a sale, tell them which bin to pull it from.
+7. **Report with `inventory_summary`.** It is the one place lot cost, remaining value and
    realized net are reconciled. Quote its `projected_net_at_target` with the caveat that
    remaining value is at target, not sold.
 

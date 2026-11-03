@@ -234,7 +234,8 @@ def test_the_page_stays_on_the_design_system():
 def test_the_view_is_organised_around_questions_not_tables():
     from inventory_plugin.view import PAGE
 
-    assert re.findall(r'data-tab="(\w+)"', PAGE) == ["next", "stock", "lots"]
+    tablist = re.search(r'<div class="pl-tabs" role="tablist".*?</div>', PAGE, re.S).group(0)
+    assert re.findall(r'data-tab="(\w+)"', tablist) == ["next", "stock", "bins", "lots"]
     for gone in (
         "mdLine",
         "mdList",
@@ -246,7 +247,7 @@ def test_the_view_is_organised_around_questions_not_tables():
     ):
         assert gone not in PAGE, gone
     # Later slices: no control may show up with nothing behind it.
-    for absent in ('data-tab="bins"', "capture=", 'data-act="scan"', ">Scan<", "Flash Gitz"):
+    for absent in ("capture=", 'data-act="scan"', ">Scan<", "Flash Gitz", "window.print", "/b/"):
         assert absent not in PAGE, absent
     for kept in (
         "pl-drawer--",
@@ -258,6 +259,51 @@ def test_the_view_is_organised_around_questions_not_tables():
         "Prefer Withdraw or Keep",
     ):
         assert kept in PAGE, kept
+
+
+def test_bin_filters_move_mode_and_the_pick_list_groups():
+    out = _run_page(
+        "\nconst its = [{ id: 'a', name: 'Boyz', status: 'available', bin_id: 'B01' }, { id: 'b', name: 'Nobz', status: 'planned', bin_id: '' },"
+        " { id: 'c', name: 'Mek', status: 'sold', bin_id: '' }, { id: 'd', name: 'Gitz', status: 'listed', bin_id: 'B02' }, { id: 'e', name: 'Kept', status: 'kept', bin_id: '' }];\n"
+        "const ids = (f) => stockItems(its, { seg: 'all', system: '', lot: '', bin: '', q: '', preset: '', ...f }).map((i) => i.id).join('');\n"
+        "const g = packGroups([{ id: 1, bin_id: 'B02' }, { id: 2, bin_id: '' }, { id: 3, bin_id: 'B01' }, { id: 4, bin_id: 'B02' }]).map(([k, xs]) => (k || '-') + ':' + xs.map((x) => x.id).join('')).join('|');\n"
+        "console.log(JSON.stringify({ b1: ids({ bin: 'B01' }), none: ids({ bin: '-' }), nobin: ids({ preset: 'nobin' }), q: ids({ q: 'b02' }),"
+        " move: ids({ seg: 'sale', exclude: 'B01' }), g }));\n"
+    )
+    assert out["b1"] == "a" and out["none"] == "bce"
+    assert out["nobin"] == "b"  # unsold and in no bin: what "Start binning" opens
+    assert out["q"] == "d"  # search reads the bin
+    assert out["move"] == "d"  # moving into B01: what is already in B01 is not offered
+    assert out["g"] == "B01:3|B02:14|-:2"  # bin order, "no bin recorded" last
+
+
+def test_an_unreadable_price_date_counts_as_stale():
+    out = _run_page(
+        "\nconst base = { status: 'available', target: 10 };\n"
+        "console.log(JSON.stringify({ bad: isStale({ ...base, price_updated_on: 'sometime in 2025' }), blank: isStale({ ...base, price_updated_on: '' }),"
+        " fresh: isStale({ ...base, price_updated_on: new Date().toISOString().slice(0, 10) }), d: daysOld('not a date') }));\n"
+    )
+    assert out == {"bad": True, "blank": True, "fresh": False, "d": None}  # Infinity serialises as null
+
+
+def test_history_reads_bin_moves_and_packing():
+    out = _run_page(
+        "\nconst n = (id) => ({ X: 'Riverblades' }[id] || '');\n"
+        "console.log(JSON.stringify([auditLine({ entity: 'item', entity_id: 'X', action: 'move', changes: { bin: ['', 'B07'] } }, n),"
+        " auditLine({ entity: 'item', entity_id: 'X', action: 'move', changes: { bin: ['B03', 'B07'] } }, n),"
+        " auditLine({ entity: 'item', entity_id: 'X', action: 'move', changes: { bin: ['B07', ''], reason: 'packed' } }, n),"
+        " auditLine({ entity: 'sale', entity_id: '9', action: 'packed', changes: { item_id: 'X' } }, n),"
+        " auditLine({ entity: 'bin', entity_id: 'B07', action: 'create', changes: { label: 'Terrain' } }, n),"
+        " auditLine({ entity: 'bin', entity_id: 'B07', action: 'delete', changes: {} }, n)]));\n"
+    )
+    assert out == [
+        "Moved Riverblades into B07",
+        "Moved Riverblades B03 → B07",
+        "Took Riverblades out of B07 (packed)",
+        "Packed Riverblades",
+        "Made bin B07 (Terrain)",
+        "Removed bin B07",
+    ]
 
 
 def test_sold_stays_out_of_the_status_options():
@@ -276,5 +322,10 @@ def test_the_page_has_multiselect_and_copy():
         "navigator.clipboard.writeText",
         'execCommand("copy")',
         "copySelected()",
+        'data-act="movesel"',
+        'btn("movehere", "Move items here"',
+        'btn("copybin", "Copy list")',
+        'data-act="packed"',
+        'id="f-bin"',
     ):
         assert needle in PAGE, needle
