@@ -467,6 +467,48 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "priced"})
         return json.dumps({"ok": True, "scan_id": scan["id"], "pricing": scan["pricing"]})
 
+    # ── listing drafts: the turn the plugin starts on "Draft listing" (drafts.py) ───
+    @tool
+    def inventory_draft_item(item_id: str) -> str:
+        """See an inventory item for writing its eBay listing draft: the record (name, system, category, condition, quantity, model count, notes) plus its photos from the scan. Use it in a listing-draft turn, then call inventory_draft_write or inventory_draft_fail."""
+        try:
+            item = store.get_item(item_id)
+            files = store.draft_photo_files(item_id)
+        except InventoryError as exc:
+            return _err(exc)
+        if item is None:
+            return _err(InventoryError(f"no item {item_id!r}"))
+        keep = ("id", "name", "system", "category", "condition", "quantity", "model_count", "notes", "status")
+        info = {"ok": True, "item": {k: item.get(k) for k in keep}, "photos": min(len(files), 3)}
+        if not files:
+            return json.dumps({**info, "note": "no photos: write from the record alone, and say so where it matters"})
+        try:
+            from graph.sdk import multimodal_tool_result  # host-only
+        except Exception:  # noqa: BLE001 — a host without the envelope: the record alone
+            return json.dumps({**info, "photos": 0, "note": "this protoAgent can't pass images; write from the record"})
+        images = [{"path": str(path), "mime": mime} for path, mime in files[:3]]
+        return multimodal_tool_result(json.dumps(info), images=images)
+
+    @tool
+    def inventory_draft_write(item_id: str, title: str, description: str, notes: str = "") -> str:
+        """Save the eBay listing draft for an inventory item. title = at most 80 characters, buyer-search style. description = plain text, condition on the first line, only what the record and photos show. notes = anything the operator should check (optional). The price is the item's target and is never part of the draft. Nothing is posted anywhere: the operator copies it into eBay."""
+        try:
+            d = store.write_draft(item_id, title, description, notes=notes, actor=ACTOR)
+        except InventoryError as exc:
+            return _err(exc)
+        emit("draft.changed", {"item_id": d["item_id"], "state": d["state"], "action": "write"})
+        return json.dumps({"ok": True, "item_id": d["item_id"], "state": d["state"], "title": d["title"]})
+
+    @tool
+    def inventory_draft_fail(item_id: str, reason: str) -> str:
+        """Give up writing an item's listing draft, with a one-line reason the operator will read (e.g. "no photos and the name doesn't say what is in the box")."""
+        try:
+            d = store.fail_draft(item_id, reason, actor=ACTOR)
+        except InventoryError as exc:
+            return _err(exc)
+        emit("draft.changed", {"item_id": d["item_id"], "state": d["state"], "action": "fail"})
+        return json.dumps({"ok": True, "item_id": d["item_id"], "state": d["state"]})
+
     return [
         inventory_summary,
         inventory_list,
@@ -488,6 +530,9 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_scan_propose,
         inventory_scan_fail,
         inventory_scan_pricing_done,
+        inventory_draft_item,
+        inventory_draft_write,
+        inventory_draft_fail,
     ]
 
 

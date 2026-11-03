@@ -497,6 +497,102 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         emit("scan.changed", {"id": scan_id.upper(), "state": "deleted", "action": "delete"})
         return {"ok": True}
 
+    # ── listing drafts (drafts.py starts the agent turn; nothing is ever posted) ────
+    from .drafts import BULK_SPACING_S, MAX_BULK, start_draft
+
+    def _draft_changed(d: dict, action: str) -> None:
+        emit("draft.changed", {"item_id": d["item_id"], "state": d["state"], "action": action})
+
+    @r.get("/drafts")
+    async def _drafts() -> dict:
+        return {"drafts": store.list_drafts(), "max_bulk": MAX_BULK}
+
+    @r.get("/items/{item_id}/draft")
+    async def _draft(item_id: str) -> dict:
+        try:
+            return {"draft": store.get_draft(item_id)}
+        except InventoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @r.post("/items/{item_id}/draft")
+    async def _draft_request(item_id: str) -> dict:
+        try:
+            store.request_draft(item_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        d = start_draft(store, item_id)
+        _draft_changed(d, "request")
+        return {"draft": d}
+
+    @r.post("/drafts/bulk")
+    async def _draft_bulk(body: dict) -> dict:
+        """Draft several items, one turn after another. Capped: a click never starts more than
+        ``MAX_BULK`` agent turns."""
+        ids = [str(i) for i in (body or {}).get("item_ids") or [] if str(i).strip()]
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            raise HTTPException(status_code=400, detail="pick at least one item")
+        if len(ids) > MAX_BULK:
+            raise HTTPException(status_code=400, detail=f"draft at most {MAX_BULK} at a time")
+        started, refused = [], []
+        for item_id in ids:
+            try:
+                store.request_draft(item_id, actor=ACTOR)
+            except InventoryError as exc:
+                refused.append({"item_id": item_id, "reason": str(exc)})
+                continue
+            d = start_draft(store, item_id, delay_seconds=BULK_SPACING_S * len(started))
+            _draft_changed(d, "request")
+            (started if d["state"] == "drafting" else refused).append(
+                {"item_id": item_id} if d["state"] == "drafting" else {"item_id": item_id, "reason": d["reason"]}
+            )
+        return {"started": started, "refused": refused}
+
+    @r.post("/items/{item_id}/draft/copied")
+    async def _draft_copied(item_id: str, body: dict) -> dict:
+        try:
+            d = store.draft_copied(item_id, str((body or {}).get("what") or ""), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        _draft_changed(d, "copy")
+        return {"draft": d}
+
+    @r.post("/items/{item_id}/draft/live")
+    async def _draft_live(item_id: str, body: dict) -> dict:
+        try:
+            d = store.draft_live(item_id, str((body or {}).get("url") or ""), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        _draft_changed(d, "live")
+        emit("item.changed", {"id": item_id, "action": "listed"})
+        return {"draft": d}
+
+    @r.get("/items/{item_id}/photos.zip")
+    async def _draft_photos_zip(item_id: str):
+        """The item's photos in listing order, for uploading to eBay (cover first)."""
+        import io
+        import zipfile
+
+        from fastapi.responses import Response
+
+        if store.get_item(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"no item {item_id!r}")
+        files = store.draft_photo_files(item_id)
+        if not files:
+            raise HTTPException(status_code=404, detail="this item has no photos yet")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            for n, (path, _mime) in enumerate(files, start=1):
+                zf.write(path, arcname=f"{n:02d}-{item_id}{path.suffix}")
+        return Response(
+            buf.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{item_id}-photos.zip"',
+                "Cache-Control": "private, no-store",
+            },
+        )
+
     @r.get("/stale")
     async def _stale(listed_days: int = 14, price_days: int = 30) -> dict:
         return store.stale(listed_days=listed_days, price_days=price_days)
