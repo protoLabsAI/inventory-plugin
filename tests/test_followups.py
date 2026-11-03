@@ -118,7 +118,7 @@ def _compose_target(parent_is_self: bool, ancestor: str, referrer: str = "") -> 
 @pytest.mark.parametrize(
     ("parent_is_self", "ancestor", "referrer", "want"),
     [
-        (False, "https://kjs-macbook-pro.taild25506.example", "", "https://kjs-macbook-pro.taild25506.example"),
+        (False, "https://hub.example.ts.net", "", "https://hub.example.ts.net"),
         (False, "http://127.0.0.1:7881", "", "http://127.0.0.1:7881"),
         # The desktop app's console: a custom scheme a WebView may treat as opaque, so "*".
         (False, "tauri://localhost", "", "*"),

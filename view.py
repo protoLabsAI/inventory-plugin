@@ -766,7 +766,8 @@ PAGE = r"""<!doctype html>
 
   // ── chat compose (protoAgent plugin-view bridge, protoagent:chat:compose) ───────────────
   // DRAFTS a message in the console's chat composer; the operator reviews it and sends. Never a
-  // send. Targeted at the console's own origin, never "*": no known host origin, no button.
+  // send. Aimed by composeTarget(): an http(s) console's exact origin, else "*" (see below); no
+  // button at all when the page isn't embedded.
   function hostOrigin() {
     try {
       if (window.parent === window) return "";
