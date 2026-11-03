@@ -16,6 +16,14 @@ log = logging.getLogger("protoagent.plugins.inventory")
 ACTOR = "console"
 
 
+def _bin_order(bin_id: str) -> tuple:
+    """B2 before B10: numbered bins in number order, anything else after, alphabetically."""
+    import re
+
+    m = re.match(r"^B(\d+)$", bin_id)
+    return (0, int(m.group(1)), "") if m else (1, 0, bin_id)
+
+
 def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: None):
     from fastapi import APIRouter, HTTPException, Query
     from fastapi.responses import PlainTextResponse
@@ -282,6 +290,61 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         for i in out["moved"]:
             emit("item.changed", {"id": i, "action": "move", "bin_id": out["bin_id"]})
         return out
+
+    # ── bin labels: the address a QR opens, and the printable sheet ──────────────
+    @r.get("/labels/base")
+    async def _label_base() -> dict:
+        from .labels import LABEL_PATH, label_base
+
+        return {**label_base(cfg), "path": LABEL_PATH}
+
+    @r.post("/labels/sheet")
+    async def _label_sheet(body: dict | None = None) -> dict:
+        """Build a printable page of labels: ``ids``, or ``unprinted``, or ``from``/``to``, or
+        ``all``. Records the bins as printed (``mark``, default true) in the same call."""
+        from .labels import label_base, sheet_html
+
+        body = body or {}
+        info = label_base(cfg)
+        if not info["base"]:
+            raise HTTPException(status_code=409, detail=info["problem"])
+        bins = sorted(store.list_bins()["bins"], key=lambda b: _bin_order(b["id"]))
+        by_id = {b["id"]: b for b in bins}
+        if isinstance(body.get("ids"), list):
+            want = [str(i or "").strip().upper() for i in body["ids"]]
+            unknown = [i for i in want if i not in by_id]
+            if unknown:
+                raise HTTPException(status_code=400, detail=f"no bin {unknown[0]!r}")
+            picked = [by_id[i] for i in dict.fromkeys(want)]
+        elif body.get("unprinted"):
+            picked = [b for b in bins if not b.get("labels_printed_on")]
+        elif body.get("from") or body.get("to"):
+            ids = [b["id"] for b in bins]
+            lo = str(body.get("from") or (ids[0] if ids else "")).strip().upper()
+            hi = str(body.get("to") or (ids[-1] if ids else "")).strip().upper()
+            if lo not in by_id or hi not in by_id:
+                raise HTTPException(status_code=400, detail="pick a range between two bins that exist")
+            i, j = sorted((ids.index(lo), ids.index(hi)))
+            picked = bins[i : j + 1]
+        elif body.get("all"):
+            picked = bins
+        else:
+            raise HTTPException(status_code=400, detail="say which bins: ids, unprinted, from/to, or all")
+        if not picked:
+            raise HTTPException(status_code=400, detail="no bins match, so there is nothing to print")
+        ids = [b["id"] for b in picked]
+        if body.get("mark", True):
+            try:
+                store.mark_labels_printed(ids, actor=ACTOR)
+            except InventoryError as exc:
+                _raise(exc)
+            emit("bin.changed", {"ids": ids, "action": "labels"})
+        return {
+            "ids": ids,
+            "base": info["base"],
+            "phone_reachable": info["phone_reachable"],
+            "html": sheet_html(picked, info["base"]),
+        }
 
     @r.get("/to-pack")
     async def _to_pack() -> dict:
