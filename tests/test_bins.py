@@ -155,6 +155,27 @@ class TestPickList:
         assert store.to_pack() == []
 
 
+def test_an_exported_sheet_re_imports_its_bins(store):
+    """Export writes bin_id; importing that sheet must not drop it (it goes through the audited
+    move), an unknown bin is a warning, and a blank bin cell keeps the item where it is."""
+    from inventory_plugin.csvio import export_csv, import_csv
+
+    store.create_bins(count=2, actor="t")
+    store.upsert_item({"id": "X", "name": "Team"}, actor="t")
+    store.upsert_item({"id": "Y", "name": "Dice"}, actor="t")
+    store.move_items(["X"], "B01", actor="t")
+    sheet = export_csv(store, kind="items")
+    assert "bin_id" in sheet.splitlines()[0]
+    store.move_items(["X"], "", actor="t")
+    out = import_csv(store, sheet, actor="t")
+    assert out["ok"] and "bin_id" not in out["ignored_columns"]
+    assert store.get_item("X")["bin_id"] == "B01" and store.get_item("Y")["bin_id"] == ""
+    assert any(a["action"] == "move" and a["changes"] == {"bin": ["", "B01"]} for a in store.audit_log(entity_id="X"))
+    out = import_csv(store, "id,name,bin\nX,Team,B99\nY,Dice,b02\n", actor="t")
+    assert any("B99" in w for w in out["warnings"])
+    assert store.get_item("X")["bin_id"] == "B01" and store.get_item("Y")["bin_id"] == "B02"
+
+
 def test_un_sell_returns_the_item_to_stock_and_keeps_the_sale_on_the_books(seeded):
     """The drawer's Return to stock: status back to available through the normal write; the
     sale row and the realized money stay (a refund is recorded separately)."""
