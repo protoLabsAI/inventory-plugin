@@ -309,10 +309,16 @@ def test_history_reads_bin_moves_and_packing():
     ]
 
 
-def test_sold_stays_out_of_the_status_options():
-    """Sold is recorded through its dialog; no select may offer it."""
-    out = _run_page("\nconsole.log(JSON.stringify({ s: STATUSES }));\n")
-    assert "sold" not in out["s"]
+def test_the_edit_dialog_never_sets_status():
+    """State moves only through the drawer's actions (Record sale, Mark available, Keep, Withdraw,
+    Return to stock) and a draft's "I listed it", each with its own guard. Edit has no status field
+    and never sends one."""
+    from inventory_plugin.view import PAGE
+
+    dialog = PAGE.split("async function itemDialog", 1)[1].split("async function lotDialog", 1)[0]
+    assert 'field("status"' not in dialog and "body.status" not in dialog and "STATUSES" not in PAGE
+    for act in ("sold:", "keep:", "withdraw:", "available:", "return:"):
+        assert act in PAGE.split("const ACTS = {", 1)[1].split("};", 1)[0]
 
 
 def test_the_page_has_multiselect_and_copy():

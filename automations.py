@@ -24,10 +24,24 @@ WEEKLY_REVIEW_PROMPT = """Weekly inventory review (automated; owned by the inven
 Keep the whole report short enough to read in a minute."""
 
 
+STALE_PRICE_DAYS_DEFAULT = 30
+
+
+def stale_price_days(cfg: dict) -> int:
+    """Price evidence older than this many days is stale: the weekly review re-checks it and the
+    view badges it. One setting for both, so they never disagree. Bounded 1..365."""
+    raw = (cfg or {}).get("stale_price_days")
+    try:
+        v = int(float(raw)) if raw not in (None, "") else STALE_PRICE_DAYS_DEFAULT
+    except (TypeError, ValueError):
+        return STALE_PRICE_DAYS_DEFAULT
+    return min(365, max(1, v))
+
+
 def weekly_review_prompt(cfg: dict) -> str:
     return WEEKLY_REVIEW_PROMPT.format(
         listed_days=int(cfg.get("stale_listing_days") or 14),
-        price_days=int(cfg.get("stale_price_days") or 30),
+        price_days=stale_price_days(cfg),
         max_items=int(cfg.get("review_max_items") or 15),
     )
 
