@@ -50,6 +50,9 @@ PAGE = r"""<!doctype html>
   .pop{position:absolute;right:0;top:100%;z-index:20;margin-top:var(--pl-space-1)}
   .pop-form{display:grid;gap:var(--pl-space-2)}
   .col-num{width:1%}
+  .rowact{flex:none;margin:0 var(--pl-space-1)}
+  .bin-id{font-family:var(--pl-font-mono)}
+  .note{margin-bottom:var(--pl-space-3)}
   .sr-only{position:absolute;width:var(--pl-border-width);height:var(--pl-border-width);overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   .dsec{padding:var(--pl-space-3) 0;border-bottom:var(--pl-border-width) solid var(--pl-color-border)}
   .dsec:last-child{border-bottom:0}
@@ -69,7 +72,7 @@ PAGE = r"""<!doctype html>
   .form textarea{min-height:calc(var(--pl-space-12) * 2.5);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs)}
   .result{margin-top:var(--pl-space-3);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs);white-space:pre-wrap}
   textarea.copytext{width:100%;min-height:calc(var(--pl-space-12) * 3.5);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs)}
-  @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *{min-height:var(--pl-space-12)}}
+  @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}}
   @media (max-width:999px){.col-lot{display:none}}
   @media (prefers-reduced-motion:reduce){*{animation:none;transition:none}}
 </style>
@@ -91,6 +94,7 @@ PAGE = r"""<!doctype html>
   <div class="view-tabs"><div class="pl-tabs" role="tablist" id="tabs" aria-label="Inventory">
     <button class="pl-tab" role="tab" data-tab="next">Next</button>
     <button class="pl-tab" role="tab" data-tab="stock">Stock</button>
+    <button class="pl-tab" role="tab" data-tab="bins">Bins</button>
     <button class="pl-tab" role="tab" data-tab="lots">Lots</button>
   </div></div>
   <div id="err" class="pl-callout pl-callout--error" role="alert" hidden></div>
@@ -120,7 +124,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], selected: new Set(), summary: null, drawer: null, f: { seg: "sale", system: "", lot: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -178,7 +182,8 @@ PAGE = r"""<!doctype html>
   function clearErr() { $("#err").hidden = true; }
 
   // ── pure view logic ──────────────────────────────────────────────────────────
-  const daysOld = (d, now = Date.now()) => (d ? (now - Date.parse(d.length === 7 ? d + "-01" : d)) / 864e5 : Infinity);
+  // An unreadable date is no evidence of freshness: treat it like a missing one (stale).
+  const daysOld = (d, now = Date.now()) => { if (!d) return Infinity; const t = Date.parse(d.length === 7 ? d + "-01" : d); return Number.isNaN(t) ? Infinity : (now - t) / 864e5; };
   const isStale = (i, now) => UNSOLD.includes(i.status) && i.target != null && daysOld(i.price_updated_on, now) > STALE_DAYS;
   const readyToList = (items) => items.filter((i) => i.status === "available" && i.target != null);
   function stockItems(items, f, now) {
@@ -187,10 +192,13 @@ PAGE = r"""<!doctype html>
     return items.filter((i) => {
       if (f.preset === "ready" && !(i.status === "available" && i.target != null)) return false;
       if (f.preset === "stale" && !isStale(i, now)) return false;
+      if (f.preset === "nobin" && !(UNSOLD.includes(i.status) && !i.bin_id)) return false;
       if (!f.preset && seg[2] && !seg[2].includes(i.status)) return false;
       if (f.system && clean(i.system) !== f.system) return false;
       if (f.lot && i.lot_id !== f.lot) return false;
-      return !q || [i.name, i.condition, i.category, i.notes, i.id].some((v) => String(v || "").toLowerCase().includes(q));
+      if (f.bin === "-" ? !!i.bin_id : f.bin && i.bin_id !== f.bin) return false;
+      if (f.exclude && i.bin_id === f.exclude) return false;  // moving into a bin: what is already there is not a choice
+      return !q || [i.name, i.condition, i.category, i.notes, i.id, i.bin_id].some((v) => String(v || "").toLowerCase().includes(q));
     });
   }
   // The same grouping and order Copy list uses, so what is on screen is what gets copied.
@@ -200,14 +208,27 @@ PAGE = r"""<!doctype html>
     const keys = [...groups.keys()];
     return keys.filter((k) => k).sort((a, b) => a.localeCompare(b)).concat(keys.includes("") ? [""] : []).map((k) => [k || "Other", groups.get(k)]);
   }
+  // The pick list, one group per bin in bin order, "no bin recorded" last.
+  function packGroups(sales) {
+    const groups = new Map();
+    for (const s of sales) { const k = s.bin_id || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(s); }
+    const keys = [...groups.keys()];
+    return keys.filter((k) => k).sort().concat(keys.includes("") ? [""] : []).map((k) => [k, groups.get(k)]);
+  }
   const FIELD_LABEL = { name: "name", lot_id: "lot", category: "category", system: "system", condition: "condition", quantity: "quantity", model_count: "model count", notes: "notes", retail_cents: "retail", cost_basis_cents: "cost basis", description: "description", source: "source", acquired_on: "date", acquisition_cost_cents: "cost" };
   // One audit row as a sentence. `nameOf` turns an item id into the name the operator knows.
   function auditLine(a, nameOf = () => "") {
     const c = (a.changes && typeof a.changes === "object") ? a.changes : {};
     const snap = c.snapshot || {};
     const who = nameOf(a.entity_id) || c.name || snap.name || (snap.item && snap.item.name) || a.entity_id;
-    if (a.entity === "sale") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
+    if (a.entity === "sale" && a.action !== "packed") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
+    if (a.entity === "bin") return (a.action === "create" ? "Made bin " : a.action === "delete" ? "Removed bin " : "Updated bin ") + a.entity_id + (c.label ? " (" + clean(c.label) + ")" : "");
+    if (a.entity === "sale" && a.action === "packed") return "Packed " + (nameOf(c.item_id) || c.item_id || "an item");
+    if (a.action === "move" && Array.isArray(c.bin)) {
+      const [from, to] = c.bin;
+      return (to ? "Moved " + who + (from ? " " + from + " → " + to : " into " + to) : "Took " + who + " out of " + from) + (c.reason === "packed" ? " (packed)" : "");
+    }
     const kind = a.entity === "lot" ? "lot " : "";
     if (a.action === "create") return "Added " + kind + who;
     if (a.action === "delete") return "Deleted " + kind + who;
@@ -307,6 +328,12 @@ PAGE = r"""<!doctype html>
       paintDrawer(esc(l.name || l.id), lotBody(l, sales), lotFoot(l));
     } catch (e) { if (mine === drawerSeq) { closeDrawer(); toast(e.message, "error"); } }
   }
+  function openBin(id) {
+    ++drawerSeq; state.drawer = { kind: "bin", id };
+    const b = binById(id);
+    if (!b) { closeDrawer(); return toast("Bin " + id + " no longer exists", "warning"); }
+    paintDrawer('<span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : ""), binBody(b), binFoot(b));
+  }
   async function openHistory() {
     const mine = ++drawerSeq; state.drawer = { kind: "history" };
     try {
@@ -321,6 +348,21 @@ PAGE = r"""<!doctype html>
   const badge = (st) => { const [t, k] = STATUS_LABEL[st] || [st, ""]; return '<span class="pl-badge' + (k ? " pl-badge--" + k : "") + '">' + esc(t) + "</span>"; };
   const staleBadge = '<span class="pl-badge pl-badge--warning">stale</span>';
   const lotName = (id) => (state.lots.find((l) => l.id === id) || {}).name || id;
+  const binById = (id) => state.bins.find((b) => b.id === id);
+  const binText = (id) => { const b = binById(id); return id ? id + (b && b.label ? " · " + b.label : "") : ""; };
+  const forSale = (i) => ["available", "listed", "pending"].includes(i.status);
+  function binBody(b) {
+    const xs = state.items.filter((i) => i.bin_id === b.id);
+    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + "</div>";
+    if (!xs.length) return h + '<div class="dsec"><div class="pl-empty"><div class="pl-empty__title">Nothing in ' + esc(b.id) + ' yet</div><div class="pl-empty__desc">Move items here to record that they live in this bin.</div></div></div>';
+    for (const [sys, its] of bySystem(xs)) h += '<div class="dsec"><h3 class="dh">' + esc(sys) + ' <span class="muted">' + its.length + '</span></h3><ul class="list">' + its.map((i) => "<li>" + itemButton(i, [clean(i.condition), (STATUS_LABEL[i.status] || [i.status])[0]].filter(Boolean).join(" · ")) + "</li>").join("") + "</ul></div>";
+    return h;
+  }
+  function binFoot(b) {
+    const xs = state.items.filter((i) => i.bin_id === b.id);
+    const btn = (act, label, primary = false) => '<button class="pl-btn' + (primary ? " pl-btn--primary" : "") + '" data-act="' + act + '" data-id="' + esc(b.id) + '">' + label + "</button>";
+    return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
+  }
 
   function itemBody(it, audit) {
     const live = (it.listings || []).filter((l) => l.state === "active");
@@ -339,6 +381,8 @@ PAGE = r"""<!doctype html>
       (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + "</span></div>").join("") : '<p class="muted">Not listed.</p>') +
       (["sold", "kept", "withdrawn"].includes(it.status) ? "" : '<button class="pl-btn pl-btn--sm" data-act="list" data-id="' + esc(it.id) + '">Add listing</button>') + "</div>";
     h += '<div class="dsec"><h3 class="dh">Details</h3>' +
+      kv("Bin", (it.bin_id ? '<button class="pl-btn pl-btn--ghost pl-btn--sm bin-id" data-bin="' + esc(it.bin_id) + '">' + esc(binText(it.bin_id)) + "</button>" : '<span class="muted">Not in a bin</span>') +
+        (it.status === "sold" && !it.bin_id ? "" : ' <button class="pl-btn pl-btn--sm" data-act="movebin" data-id="' + esc(it.id) + '">' + (it.bin_id ? "Move" : "Put in a bin") + "</button>")) +
       kv("System", esc(it.system) || '<span class="muted">—</span>') +
       kv("Condition", esc(it.condition) || '<span class="muted">—</span>') +
       kv("Category", esc(it.category) || '<span class="muted">—</span>') +
@@ -381,8 +425,9 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack")]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
+    state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
   }
   let inflight = 0;
   async function refresh() {
@@ -395,6 +440,7 @@ PAGE = r"""<!doctype html>
       const d = state.drawer;
       if (d && d.kind === "item") openItem(d.id);
       else if (d && d.kind === "lot") openLot(d.id);
+      else if (d && d.kind === "bin") openBin(d.id);
       else if (d && d.kind === "history") openHistory();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
@@ -402,6 +448,8 @@ PAGE = r"""<!doctype html>
   // ── render ───────────────────────────────────────────────────────────────────
   function render() {
     if (state.f.lot && !state.lots.some((l) => l.id === state.f.lot)) state.f.lot = "";  // the lot is gone
+    if (state.f.bin && state.f.bin !== "-" && !binById(state.f.bin)) state.f.bin = "";  // the bin is gone
+    if (state.moveTo && !binById(state.moveTo)) endMove();
     let dl = document.getElementById("systems-dl"); if (!dl) { dl = document.createElement("datalist"); dl.id = "systems-dl"; document.body.appendChild(dl); }
     dl.innerHTML = state.systems.map((s) => '<option value="' + esc(s) + '">').join("");
     let cdl = document.getElementById("conditions-dl"); if (!cdl) { cdl = document.createElement("datalist"); cdl.id = "conditions-dl"; document.body.appendChild(cdl); }
@@ -410,6 +458,7 @@ PAGE = r"""<!doctype html>
     const main = $("#main");
     if (state.tab === "next") main.innerHTML = renderNext();
     else if (state.tab === "stock") { main.innerHTML = renderStock(); renderResults(); }
+    else if (state.tab === "bins") main.innerHTML = renderBins();
     else main.innerHTML = renderLots();
   }
   function go(tab) { state.tab = tab; render(); $("#main").scrollTop = 0; }
@@ -421,6 +470,11 @@ PAGE = r"""<!doctype html>
   function renderNext() {
     const items = state.items;
     let h = "";
+    if (state.toPack.length) {
+      const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
+        sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
+      h += sec("To pack", state.toPack.length, rows, "");
+    }
     const ready = readyToList(items);
     if (ready.length) h += sec("Ready to list", ready.length, ready.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, clean(i.condition) || clean(i.system)) + "</li>").join(""), "ready");
     const split = items.filter((i) => i.status === "planned");
@@ -437,13 +491,20 @@ PAGE = r"""<!doctype html>
       h += sec("To split", split.length, rows, "split");
     }
     const stale = items.filter((i) => isStale(i)).length;
-    if (stale) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list"><li><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button></li></ul></section>';
-    return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">No priced stock to list and nothing to split.</div></div>';
+    const chores = [];
+    if (state.unbinned) chores.push(state.bins.length
+      ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
+      : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
+    if (stale) chores.push('<li><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button></li>');
+    if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
+    return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Nothing to pack, no priced stock to list and nothing to split.</div></div>';
   }
   function chipsHtml() {
     const f = state.f, chips = [];
     if (f.preset === "ready") chips.push(["preset", "Ready to list"]);
     if (f.preset === "stale") chips.push(["preset", "Stale price"]);
+    if (f.preset === "nobin") chips.push(["preset", "Not in a bin"]);
+    if (f.bin) chips.push(["bin", f.bin === "-" ? "No bin" : "Bin " + binText(f.bin)]);
     if (f.system) chips.push(["system", f.system]);
     if (f.lot) chips.push(["lot", lotName(f.lot)]);
     return chips.length ? '<div class="chips">' + chips.map(([k, l]) => '<span class="pl-tag">' + esc(l) + '<button class="pl-tag__remove" data-unchip="' + k + '" aria-label="Remove filter ' + esc(l) + '">×</button></span>').join("") + "</div>" : "";
@@ -458,22 +519,25 @@ PAGE = r"""<!doctype html>
       '<div class="pop pl-popover" id="filter-pop" hidden><div class="pop-form">' +
       '<label class="pl-field"><span class="pl-field__label">System</span><select class="pl-field__input" id="f-system">' + opt("", "Any", f.system) + state.systems.map((s) => opt(s, s, f.system)).join("") + "</select></label>" +
       '<label class="pl-field"><span class="pl-field__label">Lot</span><select class="pl-field__input" id="f-lot">' + opt("", "Any", f.lot) + state.lots.map((l) => opt(l.id, l.name || l.id, f.lot)).join("") + "</select></label>" +
+      '<label class="pl-field"><span class="pl-field__label">Bin</span><select class="pl-field__input" id="f-bin">' + opt("", "Any", f.bin) + opt("-", "Not in a bin", f.bin) + state.bins.map((b) => opt(b.id, binText(b.id), f.bin)).join("") + "</select></label>" +
       "</div></div></div></div>" +
+      (state.moveTo ? '<div class="pl-callout pl-callout--info note" role="status">Pick what goes into <span class="bin-id">' + esc(binText(state.moveTo)) + '</span>, then Move. <button class="pl-btn pl-btn--sm pl-btn--ghost" data-act="endmove">Cancel</button></div>' : "") +
       '<div id="chips">' + chipsHtml() + '</div><div id="results"></div><div id="selbar"></div>';
   }
   const checkbox = (id, label, on) => '<label class="hit pl-checkbox"><input type="checkbox" class="pl-checkbox__input" ' + id + (on ? " checked" : "") + '><span class="pl-checkbox__box"></span><span class="sr-only">' + esc(label) + "</span></label>";
   function renderResults() {
     const root = $("#results"); if (!root) return;
-    const xs = stockItems(state.items, state.f);
+    const xs = stockItems(state.items, stockFilter());
     $("#chips").innerHTML = chipsHtml();
     if (!xs.length) { root.innerHTML = '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing matches</div><div class="pl-empty__desc">Clear a filter or change the lifecycle.</div></div>'; return renderSelbar(xs); }
     const allOn = xs.every((i) => state.selected.has(i.id));
     const row = (i) => {
       const on = state.selected.has(i.id);
       const sel = checkbox('data-sel="' + esc(i.id) + '"', "Select " + i.name, on);
-      if (narrow()) return "<li" + (on ? ' class="pl-tr--selected"' : "") + ">" + sel + itemButton(i, [clean(i.condition), STATUS_LABEL[i.status] ? STATUS_LABEL[i.status][0] : i.status].filter(Boolean).join(" · ")) + "</li>";
+      if (narrow()) return "<li" + (on ? ' class="pl-tr--selected"' : "") + ">" + sel + itemButton(i, [clean(i.condition), i.bin_id, STATUS_LABEL[i.status] ? STATUS_LABEL[i.status][0] : i.status].filter(Boolean).join(" · ")) + "</li>";
       return '<tr class="pl-tr--interactive trow' + (on ? " pl-tr--selected" : "") + '" data-item="' + esc(i.id) + '" tabindex="0"><td>' + sel + "</td>" +
         "<td>" + esc(i.name) + qtyTag(i) + (clean(i.condition) ? '<span class="sub">' + esc(i.condition) + "</span>" : "") + "</td>" +
+        '<td class="bin-id">' + (i.bin_id ? esc(i.bin_id) : '<span class="muted">—</span>') + "</td>" +
         "<td>" + badge(i.status) + (isStale(i) ? " " + staleBadge : "") + '</td><td class="money col-num">' + esc(whole(i.target)) + '</td><td class="col-lot muted">' + esc(i.lot_id ? lotName(i.lot_id) : "—") + "</td></tr>";
     };
     const groups = bySystem(xs);
@@ -482,8 +546,8 @@ PAGE = r"""<!doctype html>
       root.innerHTML = '<div class="count">' + checkbox('id="sel-all"', "Select all visible", allOn) + "<span>" + count + "</span></div>" +
         groups.map(([sys, its]) => '<div class="group"><div class="pl-eyebrow group-label">' + esc(sys) + " · " + its.length + '</div><ul class="list">' + its.map(row).join("") + "</ul></div>").join("");
     } else {
-      root.innerHTML = '<table class="pl-table"><thead><tr><th>' + checkbox('id="sel-all"', "Select all visible", allOn) + '</th><th>Item</th><th>Status</th><th class="money">Target</th><th class="col-lot">Lot</th></tr></thead>' +
-        groups.map(([sys, its]) => '<tbody><tr><th colspan="5" class="pl-eyebrow" scope="colgroup">' + esc(sys) + " · " + its.length + "</th></tr>" + its.map(row).join("") + "</tbody>").join("") + "</table>";
+      root.innerHTML = '<table class="pl-table"><thead><tr><th>' + checkbox('id="sel-all"', "Select all visible", allOn) + '</th><th>Item</th><th>Bin</th><th>Status</th><th class="money">Target</th><th class="col-lot">Lot</th></tr></thead>' +
+        groups.map(([sys, its]) => '<tbody><tr><th colspan="6" class="pl-eyebrow" scope="colgroup">' + esc(sys) + " · " + its.length + "</th></tr>" + its.map(row).join("") + "</tbody>").join("") + "</table>";
     }
     renderSelbar(xs);
   }
@@ -493,25 +557,39 @@ PAGE = r"""<!doctype html>
     bar.className = n ? "selbar" : "";
     if (!n) { bar.innerHTML = ""; return; }
     const visible = xs.filter((it) => state.selected.has(it.id)).length;
-    bar.innerHTML = '<span class="selbar-count">' + n + " selected" + (visible !== n ? " (" + visible + " visible)" : "") + "</span>" +
+    const count = '<span class="selbar-count">' + n + " selected" + (visible !== n ? " (" + visible + " visible)" : "") + "</span>";
+    if (state.moveTo) { bar.innerHTML = count + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="domove">Move ' + n + " to " + esc(state.moveTo) + '</button><button class="pl-btn pl-btn--sm pl-btn--ghost" id="sel-clear">Clear</button>'; return; }
+    bar.innerHTML = count +
       '<button class="pl-btn pl-btn--sm pl-btn--primary" id="copy-md" title="System header, then one line per item: Name NoS — $20">Copy list</button>' +
+      '<button class="pl-btn pl-btn--sm" data-act="movesel">Move to bin…</button>' +
       '<button class="pl-btn pl-btn--sm pl-btn--ghost" id="sel-clear">Clear</button>' +
       (narrow() ? "" : '<span class="pl-kbd">⌘C</span>');
   }
   async function copySelected() {
     if (!state.selected.size) return;
+    return copyItems(state.selected);
+  }
+  // Copy a for-sale post for these ids (a Set is pruned of ids that no longer exist).
+  async function copyItems(ids) {
     // Re-read from the server rather than trusting the cache: an item deleted or re-priced
     // by the agent since the grid loaded must not leak stale into the copied text.
     let live; try { live = (await api("/items?limit=5000")).items; } catch (e) { toast(e.message, "error"); return; }
     const byId = Object.fromEntries(live.map((it) => [it.id, it]));
-    const dropped = [...state.selected].filter((id) => !byId[id]);
-    for (const id of dropped) state.selected.delete(id);
-    const items = live.filter((it) => state.selected.has(it.id));
+    const want = new Set(ids);
+    const dropped = [...want].filter((id) => !byId[id]);
+    for (const id of dropped) { state.selected.delete(id); want.delete(id); }
+    const items = live.filter((it) => want.has(it.id));
     if (!items.length) { toast("Nothing left to copy — the selected items no longer exist", "warning"); await refresh(); return; }
     const text = chatDoc(items);
     const note = dropped.length ? " (" + dropped.length + " no longer exist and were skipped)" : "";
     if (await copyText(text)) { toast("Copied " + items.length + " item" + (items.length === 1 ? "" : "s") + " for chat" + note, dropped.length ? "warning" : "success"); if (dropped.length) await refresh(); return; }
     await dialog({ title: "Copy " + items.length + " items", body: '<label class="pl-field span2"><span class="pl-field__label">The clipboard is blocked in this frame — select all and copy</span><textarea class="pl-field__input copytext" id="copytext" readonly>' + esc(text) + "</textarea></label>", onSubmit: null });
+  }
+  function renderBins() {
+    if (!state.bins.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Number your boxes or shelves B01, B02 … and record what lives where. ' + (state.unbinned ? state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + " no location yet." : "") + '</div><div class="pl-empty__action"><button class="pl-btn pl-btn--primary" data-act="newbins">Create bins</button></div></div>';
+    const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
+    const loose = state.unbinned ? '<ul class="list note"><li><button class="irow" data-see="nobin"><span class="irow-main"><span class="irow-name">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? "" : "s") + ' not in a bin</span><span class="irow-sub">Open them in Stock and move them</span></span></button></li></ul>' : "";
+    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
   }
   function renderLots() {
     const s = state.summary; if (!s || !s.lots.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No lots yet</div><div class="pl-empty__desc">Add one from More.</div></div>';
@@ -605,6 +683,68 @@ PAGE = r"""<!doctype html>
       onSubmit: async (v) => { await api("/items/" + encodeURIComponent(id) + "/listings", "POST", { channel: v.channel, url: v.url, price: num(v.price), notes: v.notes }); toast("Listing added", "success"); await refresh(); },
     });
   }
+  async function newBinsDialog() {
+    const first = !state.bins.length;
+    await dialog({
+      title: "New bins", submit: "Create",
+      body: field("count", "How many", first ? 6 : 1, { type: "number", step: "1", hint: "Numbered on from the last bin: B01, B02 …" }) +
+        field("label", "Label (optional)", "", { placeholder: "Blood Bowl overflow", hint: "Applied to each new bin. Change it later from the bin." }),
+      onSubmit: async (v) => {
+        const r = await api("/bins", "POST", { count: Number(v.count || 1), label: v.label });
+        const ids = r.bins.map((b) => b.id);
+        toast("Made " + (ids.length > 1 ? ids[0] + "–" + ids[ids.length - 1] : ids[0]), "success"); await refresh();
+      },
+    });
+  }
+  async function editBinDialog(id) {
+    const b = binById(id); if (!b) return;
+    await dialog({
+      title: "Edit bin " + b.id, submit: "Save",
+      body: field("label", "Label", b.label, { span2: true, placeholder: "Blood Bowl overflow" }) + field("note", "Note", b.note, { type: "textarea", span2: true }),
+      onSubmit: async (v) => { await api("/bins/" + encodeURIComponent(b.id), "PUT", { label: v.label, note: v.note }); toast("Saved", "success"); await refresh(); },
+    });
+  }
+  async function deleteBin(id) {
+    if (!(await confirm("Delete bin " + id + "?", "The bin is empty. Its history stays in the activity log.", "Delete"))) return;
+    try { await api("/bins/" + encodeURIComponent(id), "DELETE"); state.drawer = null; closeDrawer(); toast("Bin deleted", "success"); } catch (e) { toast(e.message, "error"); }
+    await refresh();
+  }
+  async function moveDialog(ids) {
+    ids = [...ids]; if (!ids.length) return;
+    const one = ids.length === 1 ? itemById(ids[0]) : null;
+    const opts = [["", "— no bin —"]].concat(state.bins.map((b) => [b.id, binText(b.id)])).concat([["__new", "A new bin (next number)"]]);
+    const current = one ? one.bin_id : "";
+    await dialog({
+      title: one ? "Move " + one.name : "Move " + ids.length + " items", submit: "Move",
+      body: field("bin", "To bin", current || (state.bins.length ? state.bins[0].id : "__new"), { type: "select", options: opts, span2: true }),
+      onSubmit: async (v) => {
+        let to = v.bin;
+        if (to === "__new") to = (await api("/bins", "POST", { count: 1 })).bins[0].id;
+        const r = await api("/bins/move", "POST", { item_ids: ids, bin_id: to });
+        toast(r.moved.length ? "Moved " + r.moved.length + (to ? " to " + to : " out of their bins") : "Already there", "success");
+        await refresh();
+      },
+    });
+  }
+  function startMove(id) {
+    state.moveTo = id; state.selected.clear();
+    Object.assign(state.f, { seg: "sale", preset: "", system: "", lot: "", bin: "", q: "" });
+    closeDrawer(); go("stock");
+  }
+  function endMove() { state.moveTo = ""; state.selected.clear(); }
+  async function doMove() {
+    const to = state.moveTo, ids = [...state.selected]; if (!to || !ids.length) return;
+    try {
+      const r = await api("/bins/move", "POST", { item_ids: ids, bin_id: to });
+      toast("Moved " + r.moved.length + " to " + to, "success");
+      endMove(); await refresh(); go("bins"); openBin(to);
+    } catch (e) { toast(e.message, "error"); }
+  }
+  async function packed(saleId) {
+    try { await api("/sales/" + encodeURIComponent(saleId) + "/packed", "POST"); toast("Packed", "success"); } catch (e) { toast(e.message, "error"); }
+    await refresh();
+  }
+  const stockFilter = () => (state.moveTo ? { ...state.f, exclude: state.moveTo } : state.f);
   async function setStatus(id, status) {
     const it = itemById(id); if (!it) return;
     if (it.status === "sold" && !(await confirm(`Un-sell ${it.name}?`, "This item has a recorded sale, which stays on the books. Only do this if the sale fell through — and consider force-recording a refund instead."))) return;
@@ -650,7 +790,7 @@ PAGE = r"""<!doctype html>
   }
 
   // ── wiring ───────────────────────────────────────────────────────────────────
-  const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
+  const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
     close: closeDrawer,
     price: (id) => priceDialog(id), sold: (id) => soldDialog(id), list: (id) => listingDialog(id),
@@ -658,9 +798,16 @@ PAGE = r"""<!doctype html>
     del: deleteItem, keep: (id) => setStatus(id, "kept"), withdraw: (id) => setStatus(id, "withdrawn"),
     available: (id) => setStatus(id, "available"), return: (id) => setStatus(id, "available"),
     editlot: (id) => lotDialog(state.lots.find((l) => l.id === id)), dellot: deleteLot,
+    newbins: () => newBinsDialog(), editbin: (id) => editBinDialog(id), delbin: deleteBin,
+    movebin: (id) => moveDialog([id]), movesel: () => moveDialog(state.selected),
+    movehere: (id) => startMove(id), endmove: () => { endMove(); render(); }, domove: () => doMove(),
+    copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
+    binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
+    packed: (id) => packed(id),
   };
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
+    else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
     else state.f.preset = what;
     go("stock");
   }
@@ -678,13 +825,14 @@ PAGE = r"""<!doctype html>
       if (e.target.closest("#sel-clear")) { state.selected.clear(); return renderResults(); }
       if (e.target.matches("[data-close-bg]")) return closeDrawer();
       if (e.target.closest(".hit")) return;
-      const t = e.target.closest("[data-tab],[data-item],[data-lot],[data-see],[data-seg],[data-unchip],[data-act],[data-menu]");
+      const t = e.target.closest("[data-tab],[data-item],[data-lot],[data-bin],[data-see],[data-seg],[data-unchip],[data-act],[data-menu]");
       if (!t) return;
       const d = t.dataset;
       if (d.tab) { closeDrawer(); return go(d.tab); }
       if (d.see) return seeAll(d.see);
       if (d.item) return openItem(d.item);
       if (d.lot) return openLot(d.lot);
+      if (d.bin) return openBin(d.bin);
       if (d.seg) { Object.assign(state.f, { seg: d.seg, preset: "" }); return render(); }
       if (d.unchip) { state.f[d.unchip] = ""; return render(); }
       if (d.menu) { setPop("#more-menu", "#more", false); return MENU[+d.menu][1](); }
@@ -693,9 +841,10 @@ PAGE = r"""<!doctype html>
     document.addEventListener("change", (e) => {
       const t = e.target;
       if (t.dataset.sel) { if (t.checked) state.selected.add(t.dataset.sel); else state.selected.delete(t.dataset.sel); return renderResults(); }
-      if (t.id === "sel-all") { for (const it of stockItems(state.items, state.f)) { if (t.checked) state.selected.add(it.id); else state.selected.delete(it.id); } return renderResults(); }
+      if (t.id === "sel-all") { for (const it of stockItems(state.items, stockFilter())) { if (t.checked) state.selected.add(it.id); else state.selected.delete(it.id); } return renderResults(); }
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
+      if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
     });
     document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } });
     document.addEventListener("keydown", (e) => {
