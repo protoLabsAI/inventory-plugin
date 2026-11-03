@@ -45,3 +45,19 @@ def test_an_unopenable_database_does_not_raise_out_of_register(tmp_path, monkeyp
     reg = FakeRegistry({"db_path": str(blocker / "inventory.db")})  # parent is a file → mkdir fails
     inventory_plugin.register(reg)  # must not raise
     assert reg.tools == []
+
+
+def test_runtime_dependencies_are_the_hosts_by_contract():
+    """protoAgent provides fastapi / langchain-core and installs a plugin's packages only from the
+    manifest's requires_pip. Declaring them in pyproject would be inert at best and a version
+    fight with the host at worst; keep both empty on purpose."""
+    import tomllib
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    assert project["dependencies"] == []
+    manifest = yaml.safe_load((root / "protoagent.plugin.yaml").read_text())
+    assert not manifest.get("requires_pip")

@@ -3,6 +3,11 @@ name = "inventory-plugin"
 version = "0.6.0"
 description = "Resale inventory as a source of truth for protoAgent — lots, items, listings, sales, price evidence, audit"
 requires-python = ">=3.11"
+# No runtime dependencies, deliberately: protoAgent loads this plugin in-process and provides
+# fastapi, langchain-core and pyyaml itself. The host installs plugin packages only from the
+# manifest's `requires_pip` (protoagent.plugin.yaml), never from this table. Test-only deps
+# live in requirements-dev.txt.
+dependencies = []
 
 [tool.ruff]
 line-length = 120
