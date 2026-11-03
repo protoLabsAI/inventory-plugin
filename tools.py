@@ -60,15 +60,21 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
 
     @tool
     def inventory_list(
-        lot_id: str = "", status: str = "", category: str = "", system: str = "", query: str = "", limit: int = 200
+        lot_id: str = "",
+        status: str = "",
+        category: str = "",
+        system: str = "",
+        query: str = "",
+        bin_id: str = "",
+        limit: int = 200,
     ) -> str:
-        """List inventory items with their targets and status, ordered by game system, then lot, then category. Filter by lot, status (comma-separated: planned,available,listed,pending,sold,kept,withdrawn), category, game system, or a text search over name/notes/id/category/system.
+        """List inventory items with their targets, status and bin, ordered by game system, then lot, then category. Filter by lot, status (comma-separated: planned,available,listed,pending,sold,kept,withdrawn), category, game system, bin (a bin id such as B03, or "-" for items in no bin), or a text search over name/notes/id/category/system/bin.
 
         Prices are in dollars. `price_basis` says what a target rests on — repeat it when you quote one.
         """
         try:
             items = store.list_items(
-                lot_id=lot_id, status=status, category=category, system=system, query=query, limit=limit
+                lot_id=lot_id, status=status, category=category, system=system, query=query, bin_id=bin_id, limit=limit
             )
             return json.dumps({"ok": True, "count": len(items), "items": items})
         except InventoryError as exc:
@@ -271,6 +277,55 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
             return _err(exc)
 
     @tool
+    def inventory_bins(action: str = "list", bin_id: str = "", count: int = 1, label: str = "", note: str = "") -> str:
+        """The physical bins stock lives in (B01, B02 …). action="list" returns every bin with its item count and unsold value at target, plus how many unsold items are in no bin; action="create" makes `count` new bins continuing the B01 sequence (or the one named `bin_id`), with an optional `label` such as "Blood Bowl overflow"; action="update" changes a bin's label/note; action="delete" removes an EMPTY bin. To see what is in a bin, use inventory_list(bin_id=…)."""
+        try:
+            if action == "list":
+                return json.dumps({"ok": True, **store.list_bins()})
+            if action == "create":
+                bins = store.create_bins(count=count, bin_id=bin_id, label=label, note=note, actor=ACTOR)
+                emit("bin.changed", {"ids": [b["id"] for b in bins], "action": "create"})
+                return json.dumps({"ok": True, "bins": bins})
+            if action == "update":
+                b = store.update_bin(bin_id, label=label or None, note=note or None, actor=ACTOR)
+                emit("bin.changed", {"ids": [b["id"]], "action": "update"})
+                return json.dumps({"ok": True, "bin": b})
+            if action == "delete":
+                n = store.delete_bin(bin_id, actor=ACTOR)
+                if n:
+                    emit("bin.changed", {"ids": [bin_id.upper()], "action": "delete"})
+                return json.dumps({"ok": bool(n), **({} if n else {"error": f"no bin {bin_id!r}"})})
+            return json.dumps({"ok": False, "error": "action must be list, create, update or delete"})
+        except InventoryError as exc:
+            return _err(exc)
+
+    @tool
+    def inventory_move_to_bin(item_ids: list[str], bin_id: str) -> str:
+        """Record where items physically are: put every item in `item_ids` into bin `bin_id` (it must exist — inventory_bins action="create" first). Pass bin_id="" to take them out of any bin. All or nothing: an unknown item or bin refuses the whole move. Every move is in the audit trail with where it came from. Only move what the operator says they moved — never guess a location."""
+        try:
+            out = store.move_items(item_ids, bin_id, actor=ACTOR)
+            for i in out["moved"]:
+                emit("item.changed", {"id": i, "action": "move", "bin_id": out["bin_id"]})
+            return json.dumps({"ok": True, **out})
+        except InventoryError as exc:
+            return _err(exc)
+
+    @tool
+    def inventory_packing(action: str = "list", sale_id: int = 0) -> str:
+        """The pick list. action="list" returns every sale not yet packed, with the item and the bin to pull it from ('' = no bin recorded), grouped by bin. action="packed" (sale_id) ticks one off once the operator says it is packed; an item with no stock left is taken out of its bin. Sales recorded before bins existed were already shipped and never appear."""
+        try:
+            if action == "list":
+                sales = store.to_pack()
+                return json.dumps({"ok": True, "count": len(sales), "sales": sales})
+            if action == "packed":
+                sale = store.mark_packed(int(sale_id), actor=ACTOR)
+                emit("sale.packed", {"sale_id": sale["id"], "item_id": sale["item_id"]})
+                return json.dumps({"ok": True, "sale": sale})
+            return json.dumps({"ok": False, "error": "action must be 'list' or 'packed'"})
+        except InventoryError as exc:
+            return _err(exc)
+
+    @tool
     def inventory_import_csv(path: str = "", csv_text: str = "", kind: str = "auto", default_lot: str = "") -> str:
         """Load a spreadsheet into the inventory. Pass a file path (relative paths resolve against the agent workspace) or the CSV text itself. Headers are matched by common names (inventory_id/id, item/name, lot_id, target_low_usd, target_price_usd, target_high_usd, status, sold_price_usd, price_source …); kind is auto-detected (items vs lots) unless given. Rows are upserted by id; a row whose status reads sold with a price also records the sale. Returns counts, the column mapping used, ignored columns and per-line warnings."""
         try:
@@ -335,6 +390,9 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_set_price,
         inventory_mark_sold,
         inventory_listing,
+        inventory_bins,
+        inventory_move_to_bin,
+        inventory_packing,
         inventory_import_csv,
         inventory_export_csv,
         inventory_reprice_plan,

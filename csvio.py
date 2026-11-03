@@ -105,6 +105,7 @@ ITEM_EXPORT_COLUMNS = (
     "cost_basis",
     "price_basis",
     "price_updated_on",
+    "bin_id",
     "notes",
     "updated_at",
 )
@@ -120,6 +121,7 @@ SALE_EXPORT_COLUMNS = (
     "fees",
     "shipping_cost",
     "net",
+    "packed_on",
     "notes",
 )
 
@@ -221,6 +223,7 @@ def import_csv(store: InventoryStore, text: str, *, kind: str = "auto", actor: s
                         channel=sold_channel,
                         sold_on=sold_on,
                         notes=f"imported from CSV (status column read {status_text!r})",
+                        packed=True,  # history, already shipped: never on the pick list
                         actor=actor,
                         force=True,  # the row already says sold; record what it sold for
                     )
