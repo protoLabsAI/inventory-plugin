@@ -395,3 +395,44 @@ def test_an_older_db_gains_the_scans_table_on_open(tmp_path):
     con.close()
     store = InventoryStore(db)
     assert store.list_scans() == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "label", "rest"),
+    [
+        ("NIB", "NIB", ""),
+        ("NIB (assumed — photo is a stock-style front shot)", "NIB", "assumed — photo is a stock-style front shot"),
+        ("New on sprue — two sprues visible", "New on sprue", "two sprues visible"),
+        ("Assembled, partly painted", "Assembled", "partly painted"),
+        ("  NoS  ", "NoS", ""),
+        ("", "", ""),
+        (
+            "a very long sentence with no separator describing the state",
+            "",
+            "a very long sentence with no separator describing the state",
+        ),
+    ],
+)
+def test_condition_label_keeps_the_label_and_hands_back_the_explanation(raw, label, rest):
+    from inventory_plugin.store import condition_label
+
+    assert condition_label(raw) == (label, rest)
+
+
+def test_an_explained_condition_lands_as_a_label_with_the_reason_in_notes(store):
+    # Live 2026-11-03: the agent answered "NIB (assumed — photo is a stock-style fr…", cut at 40
+    # chars, which would have reached the item and the Copy list.
+    u = store.add_scan_photo(store.create_scan("box", paid=1)["id"], jpeg())
+    p = store.propose_scan(
+        u["id"],
+        {
+            "name": "Combat Patrol: Example",
+            "confidence": 0.9,
+            "condition": "NIB (assumed — photo is a stock-style front shot)",
+            "notes": "Contents from retailer listings.",
+            "contents": [{"name": "Unit A", "condition": "New on sprue — loose"}],
+        },
+    )["proposal"]
+    assert p["condition"] == "NIB"
+    assert p["notes"] == "Condition: assumed — photo is a stock-style front shot. Contents from retailer listings."
+    assert p["contents"][0]["condition"] == "New on sprue"
