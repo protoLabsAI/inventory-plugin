@@ -1844,8 +1844,9 @@ class InventoryStore:
         """An item's photos in order: its own piece scan(s) first, then the box it came from."""
         own, box = [], []
         for r in con.execute(
-            "SELECT id, kind, item_ids, photos FROM scans WHERE item_ids LIKE ? ORDER BY created_at, id",
-            ('%"' + item_id.replace("%", "").replace("_", "") + "%",),
+            # instr, not LIKE: an id may hold "_" or "%", which LIKE would read as wildcards.
+            "SELECT id, kind, item_ids, photos FROM scans WHERE instr(item_ids, ?) > 0 ORDER BY created_at, id",
+            (json.dumps(item_id),),
         ):
             ids = _loads(r["item_ids"], [])
             if item_id not in ids:

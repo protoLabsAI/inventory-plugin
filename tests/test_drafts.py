@@ -313,3 +313,17 @@ def test_draft_routes_are_gated_like_every_other_data_route(registry):
         "/items/{item_id}/photos.zip",
     ):
         assert p in data_paths
+
+
+def test_an_id_with_like_wildcards_still_finds_its_photos(store):
+    # Review on #16: a LIKE pre-filter that stripped "_" and "%" lost these ids' photos.
+    for item_id in ("Wartrakk_2", "Odd%Id"):
+        u = store.create_scan("unit", actor="console")
+        store.add_scan_photo(u["id"], jpeg())
+        store.propose_scan(u["id"], {"name": item_id, "confidence": 0.9})
+        out = store.confirm_scan(u["id"], {"name": item_id})
+        (made,) = out["item_ids"]
+        with store._tx() as con:  # give the item the awkward id the store would otherwise never mint
+            con.execute("UPDATE items SET id=? WHERE id=?", (item_id, made))
+            con.execute("UPDATE scans SET item_ids=? WHERE id=?", (json.dumps([item_id]), u["id"]))
+        assert [p["scan_id"] for p in store.get_draft(item_id)["photos"]] == [u["id"]]
