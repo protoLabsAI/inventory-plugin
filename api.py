@@ -365,6 +365,7 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     # The page uploads the File itself as the body (kit.apiFetch passes a Blob through), its
     # type in Content-Type. Identification and pricing are agent turns this plugin starts
     # (scans.py); the page polls GET /scans/{id} while one is pending.
+    from .automations import stale_price_days
     from .scans import confidence_threshold, scan_timeout, start_identify, start_pricing
 
     tmo = scan_timeout(cfg)
@@ -594,8 +595,13 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         )
 
     @r.get("/stale")
-    async def _stale(listed_days: int = 14, price_days: int = 30) -> dict:
-        return store.stale(listed_days=listed_days, price_days=price_days)
+    async def _stale(listed_days: int = 14, price_days: int | None = None) -> dict:
+        return store.stale(listed_days=listed_days, price_days=price_days or stale_price_days(cfg))
+
+    @r.get("/view-config")
+    async def _view_config() -> dict:
+        """The operator settings the page needs to render the same way the agent reasons."""
+        return {"stale_price_days": stale_price_days(cfg)}
 
     @r.get("/audit")
     async def _audit(limit: int = Query(100, ge=1, le=2000), entity_id: str = "") -> dict:

@@ -147,12 +147,11 @@ PAGE = r"""<!doctype html>
   const kit = await import(BASE + "/_ds/plugin-kit.js").catch(kitFailed);
 
   const API = "/api/plugins/inventory";
-  const STATUSES = ["planned","available","listed","pending","kept","withdrawn"];
   const STATUS_LABEL = { planned: ["to split", ""], available: ["available", ""], listed: ["listed", "info"], pending: ["pending", "warning"], sold: ["sold", "success"], kept: ["kept", ""], withdrawn: ["withdrawn", ""] };
   // Where a piece is in its life. Kept and withdrawn only show under All.
   const LIFECYCLE = [["sale", "For sale", ["available", "listed", "pending"]], ["split", "To split", ["planned"]], ["sold", "Sold", ["sold"]], ["all", "All", null]];
   const UNSOLD = ["planned", "available", "listed", "pending"];
-  const STALE_DAYS = 45;
+  let STALE_DAYS = 30;  // the Stale price setting, read from /view-config on boot (same number the weekly review uses)
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
@@ -554,10 +553,11 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({}))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
+    if (vcfg && Number(vcfg.stale_price_days) > 0) STALE_DAYS = Number(vcfg.stale_price_days);
     state.drafts = Object.fromEntries((drafts.drafts || []).map((d) => [d.item_id, d])); state.maxBulk = drafts.max_bulk || 10;
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
@@ -648,7 +648,7 @@ PAGE = r"""<!doctype html>
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
-    if (stale) chores.push('<li><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button></li>');
+    if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (hostOrigin() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
     return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
   }
@@ -764,22 +764,50 @@ PAGE = r"""<!doctype html>
     return opts;
   };
 
+  // ── chat compose (protoAgent plugin-view bridge, protoagent:chat:compose) ───────────────
+  // DRAFTS a message in the console's chat composer; the operator reviews it and sends. Never a
+  // send. Targeted at the console's own origin, never "*": no known host origin, no button.
+  function hostOrigin() {
+    try {
+      if (window.parent === window) return "";
+      const a = location.ancestorOrigins && location.ancestorOrigins.length ? location.ancestorOrigins[0] : "";
+      const o = a || (document.referrer ? new URL(document.referrer).origin : "");
+      return o && o !== "null" ? o : "";
+    } catch (_) { return ""; }
+  }
+  const COMPOSE_MAX = 4000;  // the bridge takes plain text up to 4 KB
+  function repriceText(items) {
+    const head = "Please re-price these " + items.length + " item" + (items.length === 1 ? "" : "s") + " from eBay sold comps. Their price evidence is over " + STALE_DAYS + " days old. For each, run ebay_price_check (sold), then inventory_set_price with the basis and the comps; where the sold comps are thin, keep the price and say so.\n";
+    let body = "", shown = 0;
+    for (const i of items) {
+      // Plain text for the chat composer, never HTML: the bridge drafts it as text.
+      const line = ["- ", i.name, " (", i.id, ")", i.target != null ? ", now " + whole(i.target) : "", "\n"].join("");
+      if ((head + body + line).length > COMPOSE_MAX - 80) break;
+      body += line; shown++;
+    }
+    const more = items.length - shown;
+    return head + body + (more ? "…and " + more + " more: use inventory_reprice_plan for the full list.\n" : "");
+  }
+  function composeToChat(text) {
+    const origin = hostOrigin(); if (!origin) { toast("Open this view inside the console to draft a chat message.", "warning"); return; }
+    window.parent.postMessage({ type: "protoagent:chat:compose", text: String(text).slice(0, COMPOSE_MAX) }, origin);
+  }
+
   async function itemDialog(item) {
     const it = item || { lot_id: state.f.lot, status: "available", quantity: 1 };
-    const sold = it.status === "sold";  // a sold item changes state through Return to stock, never here
+    // No status here: state changes only through the drawer's own actions (Record sale, Mark available,
+    // Keep, Withdraw, Return to stock) and a draft's "I listed it", each with its own guard.
     await dialog({
       title: item ? "Edit " + item.name : "New item", submit: item ? "Save" : "Add",
       body: field("name", "Name", it.name, { required: true, span2: true }) + field("lot_id", "Lot", it.lot_id, { type: "select", options: lotOptions(it.lot_id) }) +
         field("system", "Game system", it.system || "", { placeholder: "Warhammer 40K, Blood Bowl…", list: "systems-dl", hint: "Optional. Lists and Copy list group by it." }) +
         field("category", "Category", it.category) + field("condition", "Condition", it.condition, { placeholder: "NoS, NIB, Sealed, Assembled, Painted…", list: "conditions-dl", hint: "Printed inline after the name in a copied list." }) +
-        (sold ? "" : field("status", "Status", it.status, { type: "select", options: STATUSES })) +
         field("quantity", "Quantity", it.quantity ?? 1, { type: "number", step: "1" }) + field("model_count", "Model count", it.model_count ?? "", { type: "number", step: "1" }) +
         field("retail", "Retail ($)", it.retail ?? "", { type: "number", step: "0.01", hint: "The anchor price, not a target." }) + field("cost_basis", "Cost basis ($)", it.cost_basis ?? "", { type: "number", step: "0.01" }) +
         field("notes", "Notes", it.notes, { type: "textarea", span2: true }),
       onSubmit: async (v) => {
         if (!v.name.trim()) throw new Error("A name is required");
         const body = { name: v.name, lot_id: v.lot_id, category: v.category, system: v.system, condition: v.condition, quantity: num(v.quantity), model_count: num(v.model_count), retail: num(v.retail), cost_basis: num(v.cost_basis), notes: v.notes };
-        if (!sold && (!item || v.status !== item.status)) body.status = v.status;
         if (item) await api("/items/" + encodeURIComponent(item.id), "PUT", body); else await api("/items", "POST", body);
         toast(item ? "Saved" : "Item added", "success"); await refresh();
       },
@@ -1329,6 +1357,7 @@ PAGE = r"""<!doctype html>
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
     packed: (id) => packed(id),
+    "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
   Object.assign(ACTS, SCAN_ACTS);
