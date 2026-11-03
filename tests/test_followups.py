@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 
 import inventory_plugin
 import pytest
@@ -43,7 +44,11 @@ def test_the_view_reads_the_setting_and_stale_defaults_to_it(tmp_path):
     assert c.get("/api/plugins/inventory/view-config").json() == {"stale_price_days": 45}
     api = "/api/plugins/inventory"
     c.put(api + "/lots/L", json={"name": "L"})
-    for iid, when in (("OLD", "2026-01-01"), ("NEW", "2099-01-01")):
+    # Relative to today: a fixed date goes stale (or fresh) with the calendar (#17 review).
+    today = date.today()
+    # 40 days old is stale under the default 30 and fresh under 45: the setting decides it.
+    old, fresh = (today - timedelta(days=100)).isoformat(), (today - timedelta(days=40)).isoformat()
+    for iid, when in (("OLD", old), ("NEW", fresh)):
         c.post(api + "/items", json={"id": iid, "name": iid, "lot_id": "L"})
         c.post(api + f"/items/{iid}/price", json={"target": 10, "basis": "b", "observed_on": when})
     got = c.get(api + "/stale").json()
@@ -51,6 +56,13 @@ def test_the_view_reads_the_setting_and_stale_defaults_to_it(tmp_path):
     tools = {t.name: t for t in reg.tools}
     got = json.loads(tools["inventory_stale"].invoke({}))
     assert {s["id"] for s in got["stale_prices"]} == {"OLD"} and got["thresholds"]["price_days"] == 45
+    # same data, no setting: the default 30 catches the 40-day row too
+    c30, _ = _client(tmp_path / "d30")
+    c30.put(api + "/lots/L", json={"name": "L"})
+    for iid, when in (("OLD", old), ("NEW", fresh)):
+        c30.post(api + "/items", json={"id": iid, "name": iid, "lot_id": "L"})
+        c30.post(api + f"/items/{iid}/price", json={"target": 10, "basis": "b", "observed_on": when})
+    assert {s["id"] for s in c30.get(api + "/stale").json()["stale_prices"]} == {"OLD", "NEW"}
 
 
 def test_the_page_posts_only_a_chat_compose_and_never_to_star():
