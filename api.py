@@ -6,6 +6,8 @@ from __future__ import annotations
 import contextlib
 import logging
 
+from fastapi import Request  # module level: FastAPI resolves the (postponed) annotation from these globals
+
 from .store import InventoryError, InventoryStore, normalize_status
 
 #: Target fields never travel through the generic item write — they need a basis (POST /price).
@@ -358,6 +360,142 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             _raise(exc)
         emit("sale.packed", {"sale_id": sale["id"], "item_id": sale["item_id"]})
         return {"sale": sale}
+
+    # ── scans: photo intake (spec §3) ─────────────────────────────────────────
+    # The page uploads the File itself as the body (kit.apiFetch passes a Blob through), its
+    # type in Content-Type. Identification and pricing are agent turns this plugin starts
+    # (scans.py); the page polls GET /scans/{id} while one is pending.
+    from .scans import confidence_threshold, scan_timeout, start_identify, start_pricing
+
+    tmo = scan_timeout(cfg)
+
+    def _scan_changed(scan: dict, action: str) -> None:
+        emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": action})
+
+    @r.get("/scans")
+    async def _scans(open: bool = True, limit: int = Query(50, ge=1, le=500)) -> dict:  # noqa: A002 — the query name
+        return {
+            "scans": store.list_scans(open_only=open, limit=limit, timeout_minutes=tmo),
+            "threshold": confidence_threshold(cfg),
+            "timeout_minutes": tmo,
+        }
+
+    @r.post("/scans")
+    async def _new_scan(body: dict | None = None) -> dict:
+        body = body or {}
+        try:
+            scan = store.create_scan(
+                str(body.get("kind") or ""),
+                paid=body.get("paid"),
+                source=str(body.get("source") or ""),
+                name=str(body.get("name") or ""),
+                lot_id=str(body.get("lot_id") or ""),
+                parent_id=str(body.get("parent_id") or ""),
+                actor=ACTOR,
+                timeout_minutes=tmo,
+            )
+        except InventoryError as exc:
+            _raise(exc)
+        _scan_changed(scan, "create")
+        return {"scan": scan}
+
+    def _get_scan(scan_id: str) -> dict:
+        try:
+            return store.get_scan(scan_id, timeout_minutes=tmo)
+        except InventoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @r.get("/scans/{scan_id}")
+    async def _scan(scan_id: str) -> dict:
+        return {"scan": _get_scan(scan_id)}
+
+    @r.post("/scans/{scan_id}/photos")
+    async def _scan_photo(scan_id: str, request: Request) -> dict:
+        from fastapi.concurrency import run_in_threadpool
+
+        from .photos import MAX_BYTES
+
+        _get_scan(scan_id)
+        too_big = f"photos are capped at {MAX_BYTES // (1024 * 1024)} MB"
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail=too_big)
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > MAX_BYTES:
+                raise HTTPException(status_code=413, detail=too_big)
+        try:  # sniff + sanitize (+ a HEIC conversion) off the event loop
+            scan = await run_in_threadpool(store.add_scan_photo, scan_id, bytes(buf), actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        scan = start_identify(store, scan, timeout_minutes=tmo)
+        _scan_changed(scan, "photo")
+        return {"scan": scan}
+
+    @r.get("/scans/{scan_id}/photos/{photo_id}")
+    async def _scan_photo_bytes(scan_id: str, photo_id: str):
+        from fastapi.responses import FileResponse
+
+        found = store.scan_photo_file(scan_id, photo_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"no photo {photo_id!r} on scan {scan_id!r}")
+        path, ctype = found
+        return FileResponse(path, media_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
+
+    @r.post("/scans/{scan_id}/retry")
+    async def _scan_retry(scan_id: str) -> dict:
+        try:
+            scan = store.retry_scan(scan_id, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        scan = start_identify(store, scan, timeout_minutes=tmo)
+        _scan_changed(scan, "retry")
+        return {"scan": scan}
+
+    @r.post("/scans/{scan_id}/confirm")
+    async def _scan_confirm(scan_id: str, body: dict) -> dict:
+        try:
+            scan = store.confirm_scan(scan_id, body, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        for i in scan["item_ids"]:
+            emit("item.changed", {"id": i, "action": "create"})
+        _scan_changed(scan, "confirm")
+        return {"scan": scan}
+
+    @r.post("/scans/{scan_id}/price")
+    async def _scan_price(scan_id: str) -> dict:
+        try:
+            scan, items = store.request_pricing(scan_id, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        start_pricing(store, scan, items, timeout_minutes=tmo)
+        scan = store.get_scan(scan_id, timeout_minutes=tmo)
+        _scan_changed(scan, "price")
+        return {"scan": scan}
+
+    @r.post("/scans/{scan_id}/finish")
+    async def _scan_finish(scan_id: str, body: dict | None = None) -> dict:
+        try:
+            scan = store.finish_scan(scan_id, (body or {}).get("placements") or {}, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        for i in scan["item_ids"]:
+            emit("item.changed", {"id": i, "action": "binned"})
+        _scan_changed(scan, "finish")
+        return {"scan": scan}
+
+    @r.delete("/scans/{scan_id}")
+    async def _scan_discard(scan_id: str) -> dict:
+        try:
+            n = store.discard_scan(scan_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        if not n:
+            raise HTTPException(status_code=404, detail=f"no scan {scan_id!r}")
+        emit("scan.changed", {"id": scan_id.upper(), "state": "deleted", "action": "delete"})
+        return {"ok": True}
 
     @r.get("/stale")
     async def _stale(listed_days: int = 14, price_days: int = 30) -> dict:

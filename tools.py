@@ -380,6 +380,93 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         """What needs attention: listings live longer than `listed_days`, and unsold items whose price evidence is older than `price_days` or missing. The weekly-review starting point."""
         return json.dumps({"ok": True, **store.stale(listed_days=listed_days, price_days=price_days)})
 
+    # ── scans: the turns the plugin starts after a photo (scans.py) ─────────────
+    from .scans import scan_timeout
+
+    tmo = scan_timeout(cfg)
+
+    @tool
+    def inventory_scan_photos(scan_id: str) -> str:
+        """See the photos of an inventory scan (the operator photographed a box or a piece in the Inventory view). Returns the images plus what is already known about the scan. Use it in a scan-identification turn, then call inventory_scan_propose or inventory_scan_fail."""
+        try:
+            scan = store.get_scan(scan_id, timeout_minutes=tmo)
+        except InventoryError as exc:
+            return _err(exc)
+        images = []
+        for p in scan["photos"]:
+            found = store.scan_photo_file(scan["id"], p["id"])
+            if found:
+                images.append({"path": str(found[0]), "mime": found[1]})
+        info = {
+            "ok": True,
+            "scan_id": scan["id"],
+            "kind": scan["kind"],
+            "state": scan["state"],
+            "lot_id": scan["lot_id"],
+            "photos": len(images),
+        }
+        if not images:
+            return json.dumps({**info, "ok": False, "error": "this scan has no photos yet"})
+        try:
+            from graph.sdk import multimodal_tool_result  # host-only
+        except Exception:  # noqa: BLE001 — a host without the envelope can't show images
+            return json.dumps({**info, "ok": False, "error": "this protoAgent can't pass images to the model"})
+        return multimodal_tool_result(json.dumps(info), images=images)
+
+    @tool
+    def inventory_scan_propose(
+        scan_id: str,
+        name: str,
+        confidence: float,
+        system: str = "",
+        category: str = "",
+        condition: str = "",
+        alternatives: list[str] | None = None,
+        contents: list[dict] | None = None,
+        notes: str = "",
+    ) -> str:
+        """Record what an inventory scan shows. name = the product as printed (a box) or as a buyer would search for it (a piece). confidence = 0..1 that it is the EXACT product. alternatives = up to 3 other names when unsure. contents (a box only) = the units it splits into, each {"name", "quantity", "category", "model_count"} — model_count 0 when you cannot see or confirm it; never invent contents. The operator confirms or corrects this in the Inventory view."""
+        try:
+            scan = store.propose_scan(
+                scan_id,
+                {
+                    "name": name,
+                    "confidence": confidence,
+                    "system": system,
+                    "category": category,
+                    "condition": condition,
+                    "alternatives": alternatives or [],
+                    "contents": contents or [],
+                    "notes": notes,
+                },
+                actor=ACTOR,
+                timeout_minutes=tmo,
+            )
+        except InventoryError as exc:
+            return _err(exc)
+        emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "propose"})
+        return json.dumps({"ok": True, "scan_id": scan["id"], "state": scan["state"], "proposal": scan["proposal"]})
+
+    @tool
+    def inventory_scan_fail(scan_id: str, reason: str) -> str:
+        """Give up identifying an inventory scan, with a one-line reason the operator will read (e.g. "the photo is too dark to read the box"). They can then type the name or retake the photo."""
+        try:
+            scan = store.fail_scan(scan_id, reason, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            return _err(exc)
+        emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "fail"})
+        return json.dumps({"ok": True, "scan_id": scan["id"], "state": scan["state"]})
+
+    @tool
+    def inventory_scan_pricing_done(scan_id: str, unpriced: list[dict] | None = None) -> str:
+        """Close a scan's pricing turn. unpriced = every item you did NOT set a price for, each {"item_id", "reason"} (e.g. "only 1 sold comp"). Items you priced need no entry: inventory_set_price already recorded them."""
+        try:
+            scan = store.pricing_done(scan_id, unpriced or [], actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            return _err(exc)
+        emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "priced"})
+        return json.dumps({"ok": True, "scan_id": scan["id"], "pricing": scan["pricing"]})
+
     return [
         inventory_summary,
         inventory_list,
@@ -397,6 +484,10 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_export_csv,
         inventory_reprice_plan,
         inventory_stale,
+        inventory_scan_photos,
+        inventory_scan_propose,
+        inventory_scan_fail,
+        inventory_scan_pricing_done,
     ]
 
 
