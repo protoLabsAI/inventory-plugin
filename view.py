@@ -89,6 +89,11 @@ PAGE = r"""<!doctype html>
   .uact{display:flex;align-items:center;gap:var(--pl-space-1);margin-left:auto}
   .binsel{width:auto;max-width:12rem}
   .tall{min-height:var(--pl-space-12);min-width:var(--pl-space-12)}
+  .cprow{display:flex;align-items:flex-start;gap:var(--pl-space-2);padding:var(--pl-space-2) 0;border-top:var(--pl-border-width) solid var(--pl-color-border)}
+  .cprow .irow-main{min-width:0;flex:1}
+  .cptext{display:block;margin-top:var(--pl-space-0_5);overflow-wrap:anywhere}
+  .pre{white-space:pre-wrap;font-size:var(--pl-font-size-xs);color:var(--pl-color-fg-muted)}
+  .cnt{font-size:var(--pl-font-size-2xs);margin-bottom:var(--pl-space-1)}
   .big{font-size:var(--pl-font-size-lg);margin-top:var(--pl-space-2)}
   .sc-sum{margin:var(--pl-space-3) 0 0}
   .rgroup{display:grid;gap:var(--pl-space-2)}
@@ -129,6 +134,7 @@ PAGE = r"""<!doctype html>
 <div id="overlay-root"></div>
 <div id="dialog-root"></div>
 <div class="pl-toast-stack" id="toasts" data-position="top-center" aria-live="polite"></div>
+<div class="sr-only" id="sr-live" aria-live="polite"></div>
 <script type="module">
   const $ = (s, r = document) => r.querySelector(s);
   // RULE 4 — plugin-kit.js is an ES module → dynamic import. With no kit there is no bearer, so
@@ -150,7 +156,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], scans: [], threshold: 0.7, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -249,6 +255,7 @@ PAGE = r"""<!doctype html>
     const who = nameOf(a.entity_id) || c.name || snap.name || (snap.item && snap.item.name) || a.entity_id;
     if (a.entity === "sale" && a.action !== "packed") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
+    if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
     if (a.entity === "bin" && a.action === "labels") return "Printed the label for bin " + a.entity_id;
     if (a.entity === "bin") return (a.action === "create" ? "Made bin " : a.action === "delete" ? "Removed bin " : "Updated bin ") + a.entity_id + (c.label ? " (" + clean(c.label) + ")" : "");
     if (a.entity === "sale" && a.action === "packed") return "Packed " + (nameOf(c.item_id) || c.item_id || "an item");
@@ -340,9 +347,11 @@ PAGE = r"""<!doctype html>
   async function openItem(id) {
     const mine = ++drawerSeq; state.drawer = { kind: "item", id };
     try {
-      const [{ item }, { audit }] = await Promise.all([api("/items/" + encodeURIComponent(id)), api("/audit?limit=20&entity_id=" + encodeURIComponent(id))]);
+      const [{ item }, { audit }, dr] = await Promise.all([api("/items/" + encodeURIComponent(id)), api("/audit?limit=20&entity_id=" + encodeURIComponent(id)), api("/items/" + encodeURIComponent(id) + "/draft").catch(() => null)]);
       if (mine !== drawerSeq) return;
-      paintDrawer(esc(item.name), itemBody(item, audit), itemFoot(item));
+      state.openDraft = dr ? dr.draft : null;
+      paintDrawer(esc(item.name), itemBody(item, audit, state.openDraft), itemFoot(item));
+      draftPoll(id, mine);
     } catch (e) { if (mine === drawerSeq) { closeDrawer(); toast(e.message, "error"); } }
   }
   function openLot(id) {
@@ -395,7 +404,95 @@ PAGE = r"""<!doctype html>
     return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
   }
 
-  function itemBody(it, audit) {
+  // ── listing drafts: written by an agent turn, copied by you, listed by you ─────────
+  const LSTATE = { drafting: ["drafting…", "warning"], failed: ["draft failed", "error"], draft: ["draft ready", ""], copied: ["copied, not live yet", "warning"], live: ["live on eBay", "info"], ended: ["ended", ""], sold: ["sold", "success"] };
+  const draftBadge = (st) => { const [t, k] = LSTATE[st] || [st, ""]; return '<span class="pl-badge' + (k ? " pl-badge--" + k : "") + '">' + esc(t) + "</span>"; };
+  const TITLE_MAX = 80;
+  const clip = (t, n) => { const x = clean(t); return x.length > n ? x.slice(0, n - 1).trimEnd() + "…" : x; };
+  const draftLabel = (d) => (!d || d.listing_state === "none" ? "no draft yet" : (LSTATE[d.listing_state] || [d.listing_state])[0]);
+  const draftable = (it) => ["planned", "available"].includes(it.status);
+  const cpRow = (k, label, text, extra = "") => '<div class="cprow"><div class="irow-main"><span class="pl-field__label">' + esc(label) + '</span><span class="cptext' + (k === "description" ? " pre" : "") + '">' + esc(text) + "</span>" + extra + '</div><button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="' + k + '">Copy ' + esc(label.toLowerCase()) + "</button></div>";
+  function draftBody(it, d) {
+    // Kept, withdrawn or sold stock gets no new draft; a live one still shows its listing.
+    if (!draftable(it) && !(d && d.state === "live")) return "";
+    const st = d ? d.state : "none";
+    const ask = (label, act = "draft") => '<button class="pl-btn pl-btn--sm' + (act === "draft" ? " pl-btn--primary" : "") + '" data-act="' + act + '" data-id="' + esc(it.id) + '">' + esc(label) + "</button>";
+    if (st === "none") return it.target == null
+      ? '<p class="muted">Set a price first: a draft lists at the item\'s target.</p>'
+      : '<p class="muted">No draft yet. The agent writes a title and description from the record and photos.</p>' + ask("Draft listing");
+    if (st === "drafting") return '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span><span class="pl-skel skel-line w40"></span></div><p class="muted" role="status">Drafting… usually under a minute. You can close this.</p>';
+    if (st === "failed") return '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body">' + esc(d.reason || "The draft didn't finish.") + "</div></div>" + '<div class="drow gap-t">' + ask("Try again") + "</div>";
+    if (st === "live") return "";  // the live listing (with its Open link) shows above
+    const n = d.title.length;
+    const nPhotos = (d.photos || []).length;
+    return cpRow("title", "Title", d.title, '<span class="muted cnt' + (n > TITLE_MAX ? " neg" : "") + '">' + n + " / " + TITLE_MAX + " characters</span>") +
+      '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Price</span><span class="money">' + esc(fmt(it.target)) + '</span><span class="irow-sub">' + esc(it.price_basis ? "Basis: " + clip(it.price_basis, 140) : "No basis recorded") + '</span><span class="irow-sub">Change it with Set price.</span></div>' + '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="price">Copy price</button></div>' +
+      cpRow("description", "Description", d.description) +
+      '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Photos</span><span class="irow-sub">' + (nPhotos ? nPhotos + " photo" + (nPhotos === 1 ? "" : "s") + ", metadata stripped, cover first" : "No photos from a scan") + "</span></div>" + (nPhotos ? '<button class="pl-btn pl-btn--sm tall" data-act="dphotos" data-id="' + esc(it.id) + '">Download photos</button>' : "") + "</div>" +
+      (d.notes ? '<p class="basis notes muted">' + esc(d.notes) + "</p>" : "") +
+      '<div class="drow gap-t">' + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="dlive" data-id="' + esc(it.id) + '">I listed it</button>' + ask("Regenerate", "redraft") + "</div>" +
+      '<p class="muted">Nothing posts for you. List it on eBay yourself, then paste its address here.</p>';
+  }
+  let draftTimer = 0;
+  function draftPoll(id, seq) {
+    if (draftTimer) clearTimeout(draftTimer); draftTimer = 0;
+    if (!state.openDraft || state.openDraft.state !== "drafting") return;
+    draftTimer = setTimeout(() => {
+      draftTimer = 0;
+      if (seq !== drawerSeq || !state.drawer || state.drawer.kind !== "item" || state.drawer.id !== id) return;
+      if (document.hidden) return draftPoll(id, seq);
+      api("/items/" + encodeURIComponent(id) + "/draft").then(async ({ draft }) => {
+        if (seq !== drawerSeq) return;
+        if (draft.state === "drafting") return draftPoll(id, seq);
+        const live = $("#sr-live"); if (live) live.textContent = draft.state === "draft" ? "Draft ready" : "Draft failed";
+        await refresh();
+      }).catch(() => draftPoll(id, seq));
+    }, POLL_MS);
+  }
+  async function requestDraft(id) {
+    try { await api("/items/" + encodeURIComponent(id) + "/draft", "POST"); } catch (e) { return toast(e.message, "error"); }
+    await refresh();
+  }
+  async function copyDraft(btn) {
+    const d = state.openDraft; const it = d && state.items.find((i) => i.id === d.item_id); if (!d || !it) return;
+    const k = btn.dataset.k;
+    const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : d.description;
+    const ok = await copyText(text);
+    if (!ok) return toast("Couldn't copy here. Select the text and copy it.", "warning");
+    const was = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { if (btn.isConnected) btn.textContent = was; }, 2000);
+    if (d.state === "draft") {
+      try { const { draft } = await api("/items/" + encodeURIComponent(d.item_id) + "/draft/copied", "POST", { what: k }); state.openDraft = draft; state.drafts[d.item_id] = draft; const b = document.querySelector("#lsec .dh .pl-badge"); if (b) b.outerHTML = draftBadge(draft.listing_state); }
+      catch (e) { /* the copy worked; the state catches up on the next load */ }
+    }
+  }
+  async function downloadPhotos(id) {
+    try {
+      const r = await kit.apiFetch(API + "/items/" + encodeURIComponent(id) + "/photos.zip");
+      if (!r.ok) throw new Error((await r.text()) || r.status + " " + r.statusText);
+      const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob()); a.download = id + "-photos.zip";
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { toast("Couldn't download the photos: " + (e.message || e), "error"); }
+  }
+  async function liveDialog(id) {
+    const it = state.items.find((i) => i.id === id); if (!it) return;
+    await dialog({
+      title: "Listed on eBay · " + it.name, submit: "Save",
+      body: field("url", "The eBay listing's address", "", { span2: true, placeholder: "https://www.ebay.com/itm/…", required: true }) + '<div class="span2 muted">Open the listing, then Share ▸ Copy link. This records an eBay listing at ' + esc(fmt(it.target)) + " and marks the item listed.</div>",
+      onSubmit: async (v) => { await api("/items/" + encodeURIComponent(id) + "/draft/live", "POST", { url: v.url }); toast("Recorded. " + it.name + " is listed", "success"); await refresh(); },
+    });
+  }
+  async function bulkDraft() {
+    const ids = readyToList(state.items).filter((i) => { const d = state.drafts[i.id]; return !d || d.state === "failed"; }).slice(0, state.maxBulk).map((i) => i.id);
+    if (!ids.length) return toast("Everything ready to list already has a draft", "info");
+    const ok = await dialog({
+      title: "Draft " + ids.length + " listing" + (ids.length === 1 ? "" : "s") + "?", submit: "Draft " + ids.length,
+      body: '<div class="span2">The agent writes ' + (ids.length === 1 ? "one draft" : "them one after another") + '. Each is one agent turn. Nothing is posted.</div>',
+      onSubmit: async () => { const r = await api("/drafts/bulk", "POST", { item_ids: ids }); toast("Drafting " + r.started.length + (r.refused.length ? ". " + r.refused.length + " skipped" : ""), r.refused.length ? "warning" : "success"); },
+    });
+    if (ok) await refresh();
+  }
+
+  function itemBody(it, audit, draft = null) {
     const live = (it.listings || []).filter((l) => l.state === "active");
     const obs = (it.observations || [])[0];
     let h = '<div class="dsec"><div class="drow">' + badge(it.status) + (it.quantity > 1 ? '<span class="muted">×' + esc(it.quantity) + "</span>" : "") + (isStale(it) ? staleBadge : "") + "</div>";
@@ -408,9 +505,10 @@ PAGE = r"""<!doctype html>
       '<p class="basis">' + (it.price_basis ? esc(it.price_basis) : '<span class="muted">No basis recorded.</span>') + "</p>" +
       '<div class="muted">' + esc([it.price_updated_on, obs && obs.n ? obs.n + " comps" : ""].filter(Boolean).join(" · ")) + "</div>" +
       '<div class="drow"></div><button class="pl-btn pl-btn--sm" data-act="price" data-id="' + esc(it.id) + '">Set price</button></div>';
-    h += '<div class="dsec"><h3 class="dh">Listing</h3>' +
-      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + "</span></div>").join("") : '<p class="muted">Not listed.</p>') +
-      (["sold", "kept", "withdrawn"].includes(it.status) ? "" : '<button class="pl-btn pl-btn--sm" data-act="list" data-id="' + esc(it.id) + '">Add listing</button>') + "</div>";
+    h += '<div class="dsec" id="lsec"><h3 class="dh">Listing' + (draft && LSTATE[draft.listing_state] ? " " + draftBadge(draft.listing_state) : "") + "</h3>" +
+      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + "</span></div>").join("") : "") +
+      draftBody(it, draft) +
+      (["sold", "kept", "withdrawn"].includes(it.status) ? "" : '<div class="drow gap-t"><button class="pl-btn pl-btn--sm pl-btn--ghost" data-act="list" data-id="' + esc(it.id) + '">Add a listing by hand</button></div>') + "</div>";
     h += '<div class="dsec"><h3 class="dh">Details</h3>' +
       kv("Bin", (it.bin_id ? '<button class="pl-btn pl-btn--ghost pl-btn--sm bin-id" data-bin="' + esc(it.bin_id) + '">' + esc(binText(it.bin_id)) + "</button>" : '<span class="muted">Not in a bin</span>') +
         (it.status === "sold" && !it.bin_id ? "" : ' <button class="pl-btn pl-btn--sm" data-act="movebin" data-id="' + esc(it.id) + '">' + (it.bin_id ? "Move" : "Put in a bin") + "</button>")) +
@@ -456,10 +554,11 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
+    state.drafts = Object.fromEntries((drafts.drafts || []).map((d) => [d.item_id, d])); state.maxBulk = drafts.max_bulk || 10;
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
@@ -510,8 +609,8 @@ PAGE = r"""<!doctype html>
   function go(tab) { state.tab = tab; render(); $("#main").scrollTop = 0; }
   const qtyTag = (i) => (i.quantity > 1 ? ' <span class="muted">×' + esc(i.quantity) + "</span>" : "");
   const itemButton = (i, subline) => '<button class="irow" data-item="' + esc(i.id) + '"><span class="irow-main"><span class="irow-name">' + esc(i.name) + qtyTag(i) + '</span><span class="irow-sub">' + esc(subline) + "</span></span>" + (isStale(i) ? staleBadge : "") + '<span class="money">' + esc(whole(i.target)) + "</span></button>";
-  function sec(title, n, rows, see) {
-    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">' + esc(title) + ' <span class="muted">' + n + "</span></h2>" + (see ? '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-see="' + see + '">See all ' + n + "</button>" : "") + '</div><ul class="list">' + rows + "</ul></section>";
+  function sec(title, n, rows, see, extra = "") {
+    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">' + esc(title) + ' <span class="muted">' + n + "</span></h2>" + (see || extra ? '<span class="row-acts">' + extra + (see ? '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-see="' + see + '">See all ' + n + "</button>" : "") + "</span>" : "") + '</div><ul class="list">' + rows + "</ul></section>";
   }
   function renderNext() {
     const items = state.items;
@@ -525,8 +624,12 @@ PAGE = r"""<!doctype html>
       const rows = state.scans.slice(0, ROW_CAP).map((s) => '<li><button class="irow" data-act="resumescan" data-id="' + esc(s.id) + '"><span class="irow-main"><span class="irow-name">' + esc(scanTitle(s)) + '</span><span class="irow-sub">' + esc(scanSub(s)) + "</span></span>" + (scanNeedsCheck(s) ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join("");
       h += sec("Needs a look", state.scans.length, rows, "");
     }
+    const stuck = items.filter((i) => i.status === "available" && state.drafts[i.id] && state.drafts[i.id].copied_stale);
+    if (stuck.length) h += sec("Copied, not live yet", stuck.length, stuck.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, "copied " + String(state.drafts[i.id].copied_at).slice(0, 10) + " · did it go live?") + "</li>").join(""), "");
     const ready = readyToList(items);
-    if (ready.length) h += sec("Ready to list", ready.length, ready.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, clean(i.condition) || clean(i.system)) + "</li>").join(""), "ready");
+    const undrafted = ready.filter((i) => { const d = state.drafts[i.id]; return !d || d.state === "failed"; }).length;
+    const bulk = undrafted ? '<button class="pl-btn pl-btn--sm" data-act="draftbulk">Draft ' + Math.min(undrafted, state.maxBulk) + "</button>" : "";
+    if (ready.length) h += sec("Ready to list", ready.length, ready.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, [draftLabel(state.drafts[i.id]), i.bin_id || ""].filter(Boolean).join(" · ")) + "</li>").join(""), "ready", bulk);
     const split = items.filter((i) => i.status === "planned");
     if (split.length) {
       const byLot = new Map();
@@ -1226,6 +1329,7 @@ PAGE = r"""<!doctype html>
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
     packed: (id) => packed(id),
+    draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
   Object.assign(ACTS, SCAN_ACTS);
   function seeAll(what) {
@@ -1259,6 +1363,7 @@ PAGE = r"""<!doctype html>
       if (d.seg) { Object.assign(state.f, { seg: d.seg, preset: "" }); return render(); }
       if (d.unchip) { state.f[d.unchip] = ""; return render(); }
       if (d.menu) { setPop("#more-menu", "#more", false); return MENU[+d.menu][1](); }
+      if (d.act === "dcopy") return copyDraft(t);
       if (d.act) return ACTS[d.act](d.id);
     });
     document.addEventListener("change", (e) => {

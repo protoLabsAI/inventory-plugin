@@ -90,3 +90,15 @@ with `model_count` 0 for anything you cannot see or confirm. Never pad the list.
 **pricing** turn, follow "Re-pricing an item" for each item listed, set no price below 3
 relevant sold comps, and finish with `inventory_scan_pricing_done(scan_id, unpriced)`. Don't
 message the operator from either turn; the view shows the result.
+
+## Listing-draft turns
+
+**Draft listing** in the Inventory view starts a turn in that item's own session with a
+prompt naming the item id. Call `inventory_draft_item(item_id)` to see the record and its
+photos, then `inventory_draft_write(item_id, title, description)` once, or
+`inventory_draft_fail(item_id, reason)` when there isn't enough for an honest listing. The
+title is at most 80 characters, buyer-search style; the description is plain text, condition
+on the first line, and only what the record and photos show. No eBay, pricing tools or
+subagents, and a web search only when the record lacks the basics. The price is the item's
+target and is never part of the draft. Nothing is posted: the operator lists it and records
+the URL. Don't message the operator from the turn.

@@ -147,6 +147,21 @@ CREATE TABLE IF NOT EXISTS scans (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_scans_parent ON scans(parent_id);
+CREATE TABLE IF NOT EXISTS drafts (
+  item_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'drafting',
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  listing_id INTEGER,
+  requested_at TEXT NOT NULL DEFAULT '',
+  drafted_at TEXT NOT NULL DEFAULT '',
+  copied_at TEXT NOT NULL DEFAULT '',
+  live_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -219,6 +234,38 @@ def scan_key(value) -> str:
     if not _SCAN_ID_RE.match(v):
         raise InventoryError(f"no scan {value!r}")
     return v
+
+
+# ── listing drafts ───────────────────────────────────────────────────────────────
+DRAFT_TIMEOUT_MINUTES = 10
+#: eBay's title limit.
+TITLE_MAX = 80
+DESCRIPTION_MAX = 4000
+#: An eBay item page (any title slug, any query), or the eBay app's share short link.
+_EBAY_ITEM_RE = re.compile(r"^https?://(?:www\.|m\.)?ebay\.com/itm/(?:[^/?#\s]+/)?(\d{9,15})(?:[/?#]\S*)?$", re.I)
+_EBAY_SHORT_RE = re.compile(r"^https?://ebay\.us/(?:m/)?[A-Za-z0-9]{4,16}$", re.I)
+
+
+def ebay_item_url(value) -> str:
+    """An eBay listing URL as stored: ``https://www.ebay.com/itm/<number>``, or an ``ebay.us``
+    share link kept as given. Anything else is refused: this field is what marks an item listed."""
+    v = str(value or "").strip()
+    m = _EBAY_ITEM_RE.match(v)
+    if m:
+        return f"https://www.ebay.com/itm/{m.group(1)}"
+    if _EBAY_SHORT_RE.match(v):
+        return v
+    raise InventoryError("paste the eBay listing's address, like https://www.ebay.com/itm/123456789012")
+
+
+def _age_over(iso: str, *, minutes: int) -> bool:
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=UTC)
+    return datetime.now(UTC) - t > timedelta(minutes=minutes)
 
 
 def _clean(value, limit: int) -> str:
@@ -779,6 +826,10 @@ class InventoryStore:
         con.execute("DELETE FROM listings WHERE item_id=?", (item_id,))
         con.execute("DELETE FROM sales WHERE item_id=?", (item_id,))
         con.execute("DELETE FROM price_observations WHERE item_id=?", (item_id,))
+        draft = con.execute("SELECT * FROM drafts WHERE item_id=?", (item_id,)).fetchone()
+        if draft is not None:
+            snapshot["draft"] = dict(draft)
+            con.execute("DELETE FROM drafts WHERE item_id=?", (item_id,))
         InventoryStore._audit(con, "item", item_id, "delete", actor, {"snapshot": snapshot})
         return 1
 
@@ -1780,6 +1831,230 @@ class InventoryStore:
         for x in (sid, *kids):
             shutil.rmtree(self.scans_dir / x, ignore_errors=True)
         return 1
+
+    # ── listing drafts (0.9.0) ────────────────────────────────────────────────
+    # A draft is the agent's eBay copy for one item: title, description, the item's scan photos.
+    # The price is never stored here: it is the item's target, so it always carries its basis.
+    # Nothing is posted anywhere; the operator pastes the copy into eBay and records the URL.
+    def _draft_row(self, con, item_id: str):
+        return con.execute("SELECT * FROM drafts WHERE item_id=?", (item_id,)).fetchone()
+
+    @staticmethod
+    def _item_photos(con, item_id: str) -> list[dict]:
+        """An item's photos in order: its own piece scan(s) first, then the box it came from."""
+        own, box = [], []
+        for r in con.execute(
+            # instr, not LIKE: an id may hold "_" or "%", which LIKE would read as wildcards.
+            "SELECT id, kind, item_ids, photos FROM scans WHERE instr(item_ids, ?) > 0 ORDER BY created_at, id",
+            (json.dumps(item_id),),
+        ):
+            ids = _loads(r["item_ids"], [])
+            if item_id not in ids:
+                continue
+            target = own if (r["kind"] == "unit" or ids == [item_id]) else box
+            target.extend(
+                {"scan_id": r["id"], "photo_id": p["id"]}
+                for p in _loads(r["photos"], [])
+                if p.get("ext") in _PHOTO_TYPES and _PHOTO_ID_RE.match(str(p.get("id") or ""))
+            )
+        return own + box
+
+    def _draft_dict(self, con, item, row, timeout_minutes: int) -> dict:
+        listing = None
+        if row is not None and row["listing_id"] is not None:
+            lr = con.execute("SELECT * FROM listings WHERE id=?", (row["listing_id"],)).fetchone()
+            listing = _listing_row_to_dict(lr) if lr is not None else None
+        state = row["state"] if row is not None else "none"
+        reason = row["reason"] if row is not None else ""
+        if state == "drafting" and row["requested_at"] and _age_over(row["requested_at"], minutes=timeout_minutes):
+            state, reason = "failed", reason or "The draft didn't finish. Try again."
+        if item["status"] == "sold":
+            listing_state = "sold"
+        elif listing is not None and listing["state"] in ("ended", "sold"):
+            listing_state = listing["state"]
+        elif state == "live":
+            listing_state = "live"
+        else:
+            listing_state = state
+        copied_at = row["copied_at"] if row is not None else ""
+        return {
+            "item_id": item["id"],
+            "state": state,
+            "listing_state": listing_state,
+            "title": row["title"] if row is not None else "",
+            "description": row["description"] if row is not None else "",
+            "notes": row["notes"] if row is not None else "",
+            "reason": reason,
+            "requested_at": row["requested_at"] if row is not None else "",
+            "drafted_at": row["drafted_at"] if row is not None else "",
+            "copied_at": copied_at,
+            "copied_stale": state == "copied" and bool(copied_at) and _age_over(copied_at, minutes=24 * 60),
+            "live_at": row["live_at"] if row is not None else "",
+            "listing": listing,
+            "photos": self._item_photos(con, item["id"]),
+        }
+
+    def get_draft(self, item_id: str, *, timeout_minutes: int = DRAFT_TIMEOUT_MINUTES) -> dict:
+        with self._read() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                raise InventoryError(f"no item {item_id!r}")
+            return self._draft_dict(con, item, self._draft_row(con, item_id), timeout_minutes)
+
+    def list_drafts(self, *, timeout_minutes: int = DRAFT_TIMEOUT_MINUTES) -> list[dict]:
+        """Every draft, without its text or photos: what the Next tab needs per row."""
+        with self._read() as con:
+            out = []
+            for row in con.execute("SELECT * FROM drafts ORDER BY updated_at DESC"):
+                item = con.execute("SELECT * FROM items WHERE id=?", (row["item_id"],)).fetchone()
+                if item is None:
+                    continue
+                d = self._draft_dict(con, item, row, timeout_minutes)
+                out.append(
+                    {k: d[k] for k in ("item_id", "state", "listing_state", "reason", "copied_at", "copied_stale")}
+                )
+            return out
+
+    def request_draft(self, item_id: str, *, actor: str = "") -> dict:
+        """Mark an item as being drafted (the API then starts the agent turn). Needs a price:
+        the draft's price IS the item's target, with its basis."""
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                raise InventoryError(f"no item {item_id!r}")
+            if item["status"] not in ("planned", "available"):
+                raise InventoryError(f"item {item_id!r} is {item['status']}; only unlisted stock gets a draft")
+            if item["target_cents"] is None:
+                raise InventoryError("set a price first: a listing draft uses the item's target and its basis")
+            row = self._draft_row(con, item_id)
+            if row is not None and row["state"] == "live":
+                raise InventoryError("this item is already live on eBay")
+            ts = now_iso()
+            if row is None:
+                con.execute(
+                    "INSERT INTO drafts(item_id, state, requested_at, created_at, updated_at) VALUES (?,?,?,?,?)",
+                    (item_id, "drafting", ts, ts, ts),
+                )
+            else:
+                con.execute(
+                    "UPDATE drafts SET state='drafting', reason='', requested_at=?, updated_at=? WHERE item_id=?",
+                    (ts, ts, item_id),
+                )
+            self._audit(con, "draft", item_id, "request", actor, {"regenerate": row is not None})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def write_draft(self, item_id: str, title: str, description: str, *, notes: str = "", actor: str = "agent") -> dict:
+        """The agent's copy. Refused (with the fix) rather than silently trimmed, so the agent
+        rewrites a long title instead of the operator pasting a cut one."""
+        t = " ".join(str(title or "").split())
+        if not t:
+            raise InventoryError("a draft needs a title")
+        if len(t) > TITLE_MAX:
+            raise InventoryError(f"the title is {len(t)} characters; eBay allows {TITLE_MAX}. Shorten it and try again")
+        lines = [" ".join(ln.split()) for ln in str(description or "").replace("\r\n", "\n").split("\n")]
+        desc = "\n".join(lines).strip()
+        while "\n\n\n" in desc:
+            desc = desc.replace("\n\n\n", "\n\n")
+        if not desc:
+            raise InventoryError("a draft needs a description")
+        if len(desc) > DESCRIPTION_MAX:
+            raise InventoryError(f"the description is {len(desc)} characters; keep it under {DESCRIPTION_MAX}")
+        if re.search(r"<\s*/?\s*[a-zA-Z][^>]*>", desc):
+            raise InventoryError("write the description as plain text, without HTML tags")
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                raise InventoryError(f"no item {item_id!r}")
+            row = self._draft_row(con, item_id)
+            if row is not None and row["state"] == "live":
+                raise InventoryError("this item is already live on eBay; its draft is closed")
+            ts = now_iso()
+            if row is None:
+                con.execute(
+                    "INSERT INTO drafts(item_id, state, title, description, notes, drafted_at, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (item_id, "draft", t, desc, _clean(notes, 500), ts, ts, ts),
+                )
+            else:
+                con.execute(
+                    "UPDATE drafts SET state='draft', title=?, description=?, notes=?, reason='', drafted_at=?, "
+                    "copied_at='', updated_at=? WHERE item_id=?",
+                    (t, desc, _clean(notes, 500), ts, ts, item_id),
+                )
+            self._audit(con, "draft", item_id, "write", actor, {"title": t, "chars": len(desc)})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def fail_draft(self, item_id: str, reason: str, *, actor: str = "agent") -> dict:
+        why = _clean(reason, 300) or "The agent couldn't write a listing for this item."
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            row = self._draft_row(con, item_id)
+            if item is None or row is None:
+                raise InventoryError(f"no draft for {item_id!r}")
+            if row["state"] != "drafting":
+                raise InventoryError("this draft isn't being written")
+            con.execute(
+                "UPDATE drafts SET state='failed', reason=?, updated_at=? WHERE item_id=?", (why, now_iso(), item_id)
+            )
+            self._audit(con, "draft", item_id, "fail", actor, {"reason": why})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def draft_copied(self, item_id: str, what: str, *, actor: str = "") -> dict:
+        """The operator copied part of the draft. The first copy moves it to ``copied``, so Next
+        can ask a day later whether it went live."""
+        if what not in ("title", "price", "description"):
+            raise InventoryError("copied what? title, price or description")
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            row = self._draft_row(con, item_id)
+            if item is None or row is None or row["state"] not in ("draft", "copied"):
+                raise InventoryError(f"no draft to copy for {item_id!r}")
+            if row["state"] == "draft":
+                ts = now_iso()
+                con.execute(
+                    "UPDATE drafts SET state='copied', copied_at=?, updated_at=? WHERE item_id=?", (ts, ts, item_id)
+                )
+                self._audit(con, "draft", item_id, "copy", actor, {"what": what})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def draft_live(self, item_id: str, url: str, *, actor: str = "") -> dict:
+        """The operator listed it on eBay: record the listing (at the item's target) and mark the
+        item listed, in one transaction with the audit rows."""
+        clean_url = ebay_item_url(url)
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            row = self._draft_row(con, item_id)
+            if item is None or row is None or row["state"] not in ("draft", "copied"):
+                raise InventoryError(f"no draft to mark live for {item_id!r}")
+            if item["status"] in CLOSED:
+                raise InventoryError(
+                    f"item {item_id!r} is {item['status']}; set it back to available before listing it"
+                )
+            ts, today = now_iso(), today_iso()
+            cur = con.execute(
+                "INSERT INTO listings(item_id, channel, url, price_cents, listed_on, notes) VALUES (?,?,?,?,?,?)",
+                (item_id, "eBay", clean_url, item["target_cents"], today, "From the listing draft."),
+            )
+            if item["status"] in ("planned", "available"):
+                con.execute("UPDATE items SET status='listed', updated_at=? WHERE id=?", (ts, item_id))
+            con.execute(
+                "UPDATE drafts SET state='live', listing_id=?, live_at=?, updated_at=? WHERE item_id=?",
+                (cur.lastrowid, ts, ts, item_id),
+            )
+            self._audit(con, "listing", cur.lastrowid, "create", actor, {"item_id": item_id, "channel": "eBay"})
+            self._audit(con, "draft", item_id, "live", actor, {"url": clean_url, "listing_id": cur.lastrowid})
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def draft_photo_files(self, item_id: str) -> list[tuple[Path, str]]:
+        with self._read() as con:
+            refs = self._item_photos(con, item_id)
+        out = []
+        for ref in refs:
+            found = self.scan_photo_file(ref["scan_id"], ref["photo_id"])
+            if found:
+                out.append(found)
+        return out
 
 
 def _days_ago(days: int) -> str:
