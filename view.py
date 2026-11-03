@@ -9,6 +9,8 @@ it own theme tokens + the init handshake.
 
 from __future__ import annotations
 
+from .labels import LABEL_PREFIX, console_root, norm_bin_id, older_host_page, view_target
+
 VIEW_PATH = "/view"
 
 PAGE = r"""<!doctype html>
@@ -22,6 +24,7 @@ PAGE = r"""<!doctype html>
   .main{flex:1;overflow:auto;padding:var(--pl-space-3) var(--pl-space-4) var(--pl-space-8)}
   .sec{margin-bottom:var(--pl-space-6)}
   .sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--pl-space-2);margin-bottom:var(--pl-space-1_5)}
+  .row-acts{display:flex;gap:var(--pl-space-2)}
   .sec-title{margin:0;font-size:var(--pl-font-size-base);font-weight:var(--pl-font-weight-medium)}
   .list{list-style:none;margin:0;padding:0;border-top:var(--pl-border-width) solid var(--pl-color-border)}
   .list li{display:flex;align-items:center;border-bottom:var(--pl-border-width) solid var(--pl-color-border)}
@@ -223,6 +226,7 @@ PAGE = r"""<!doctype html>
     const who = nameOf(a.entity_id) || c.name || snap.name || (snap.item && snap.item.name) || a.entity_id;
     if (a.entity === "sale" && a.action !== "packed") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
+    if (a.entity === "bin" && a.action === "labels") return "Printed the label for bin " + a.entity_id;
     if (a.entity === "bin") return (a.action === "create" ? "Made bin " : a.action === "delete" ? "Removed bin " : "Updated bin ") + a.entity_id + (c.label ? " (" + clean(c.label) + ")" : "");
     if (a.entity === "sale" && a.action === "packed") return "Packed " + (nameOf(c.item_id) || c.item_id || "an item");
     if (a.action === "move" && Array.isArray(c.bin)) {
@@ -353,7 +357,7 @@ PAGE = r"""<!doctype html>
   const forSale = (i) => ["available", "listed", "pending"].includes(i.status);
   function binBody(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
-    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + "</div>";
+    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + '<div class="drow muted">' + (b.labels_printed_on ? "Label printed " + esc(b.labels_printed_on) : "No label printed yet") + "</div></div>";
     if (!xs.length) return h + '<div class="dsec"><div class="pl-empty"><div class="pl-empty__title">Nothing in ' + esc(b.id) + ' yet</div><div class="pl-empty__desc">Move items here to record that they live in this bin.</div></div></div>';
     for (const [sys, its] of bySystem(xs)) h += '<div class="dsec"><h3 class="dh">' + esc(sys) + ' <span class="muted">' + its.length + '</span></h3><ul class="list">' + its.map((i) => "<li>" + itemButton(i, [clean(i.condition), (STATUS_LABEL[i.status] || [i.status])[0]].filter(Boolean).join(" · ")) + "</li>").join("") + "</ul></div>";
     return h;
@@ -361,7 +365,7 @@ PAGE = r"""<!doctype html>
   function binFoot(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
     const btn = (act, label, primary = false) => '<button class="pl-btn' + (primary ? " pl-btn--primary" : "") + '" data-act="' + act + '" data-id="' + esc(b.id) + '">' + label + "</button>";
-    return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
+    return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
   }
 
   function itemBody(it, audit) {
@@ -429,6 +433,14 @@ PAGE = r"""<!doctype html>
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
   }
+  // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
+  const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
+  let startDone = !START_BIN;
+  function applyStartBin() {
+    startDone = true; state.tab = "bins"; render();
+    if (binById(START_BIN)) return openBin(START_BIN);
+    toast("There's no bin " + START_BIN + " here. It may have been deleted, or the label belongs to another agent.", "warning");
+  }
   let inflight = 0;
   async function refresh() {
     const mine = ++inflight;  // a slower earlier load must not paint over a newer one
@@ -437,6 +449,7 @@ PAGE = r"""<!doctype html>
       await loadCore();
       if (mine !== inflight) return;
       render();
+      if (!startDone) return applyStartBin();
       const d = state.drawer;
       if (d && d.kind === "item") openItem(d.id);
       else if (d && d.kind === "lot") openLot(d.id);
@@ -589,7 +602,7 @@ PAGE = r"""<!doctype html>
     if (!state.bins.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Number your boxes or shelves B01, B02 … and record what lives where. ' + (state.unbinned ? state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + " no location yet." : "") + '</div><div class="pl-empty__action"><button class="pl-btn pl-btn--primary" data-act="newbins">Create bins</button></div></div>';
     const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
     const loose = state.unbinned ? '<ul class="list note"><li><button class="irow" data-see="nobin"><span class="irow-main"><span class="irow-name">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? "" : "s") + ' not in a bin</span><span class="irow-sub">Open them in Stock and move them</span></span></button></li></ul>' : "";
-    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
+    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><span class="row-acts"><button class="pl-btn pl-btn--sm" data-act="printlabels">Print labels</button><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></span></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
   }
   function renderLots() {
     const s = state.summary; if (!s || !s.lots.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No lots yet</div><div class="pl-empty__desc">Add one from More.</div></div>';
@@ -681,6 +694,38 @@ PAGE = r"""<!doctype html>
       body: field("channel", "Channel", "eBay", { required: true }) + field("price", "Listed price ($)", it.target ?? "", { type: "number", step: "0.01" }) +
         field("url", "URL", "", { span2: true, placeholder: "https://www.ebay.com/itm/…" }) + field("notes", "Notes", "", { span2: true }),
       onSubmit: async (v) => { await api("/items/" + encodeURIComponent(id) + "/listings", "POST", { channel: v.channel, url: v.url, price: num(v.price), notes: v.notes }); toast("Listing added", "success"); await refresh(); },
+    });
+  }
+  const binOrder = (id) => { const m = /^B(\d+)$/.exec(id); return m ? [0, +m[1], ""] : [1, 0, id]; };
+  const sortBins = (bins) => bins.slice().sort((a, b) => { const x = binOrder(a.id), y = binOrder(b.id); return x[0] - y[0] || x[1] - y[1] || (x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0); });
+  async function labelsDialog(only) {
+    if (!state.bins.length) return toast("Make some bins first. Then print their labels.", "warning");
+    let info;
+    try { info = await api("/labels/base"); } catch (e) { return toast(e.message, "error"); }
+    if (!info.base) return toast(info.problem, "error");
+    const ids = sortBins(state.bins).map((b) => b.id);
+    const unprinted = state.bins.filter((b) => !b.labels_printed_on).length;
+    const where = '<div class="span2 muted">Each label opens ' + esc(info.base + info.path) + "&lt;bin&gt;." +
+      (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + "</div>";
+    const body = only ? '<div class="span2">One label for bin ' + esc(only) + ".</div>" + where :
+      field("mode", "Which labels", unprinted ? "unprinted" : "all", { type: "select", options: [["unprinted", "Bins without a printed label (" + unprinted + ")"], ["range", "A range of bins"], ["all", "All bins (" + ids.length + ")"]] }) +
+      field("from", "From", ids[0], { type: "select", options: ids, hint: "Only used for a range." }) + field("to", "To", ids[ids.length - 1], { type: "select", options: ids }) + where;
+    await dialog({
+      title: only ? "Print the label for " + only : "Print bin labels", submit: "Open the sheet", body,
+      onSubmit: async (v) => {
+        const w = window.open("", "_blank");  // before any await: a new tab needs the click itself
+        const req = only ? { ids: [only] } : v.mode === "range" ? { from: v.from, to: v.to } : v.mode === "all" ? { all: true } : { unprinted: true };
+        let r;
+        try { r = await api("/labels/sheet", "POST", req); } catch (e) { if (w) w.close(); throw e; }
+        const n = r.ids.length, what = n + " label" + (n === 1 ? "" : "s");
+        if (w) {
+          w.document.open(); w.document.write(r.html); w.document.close();
+          toast("Opened " + what + " in a new tab. Print from there.", "success"); await refresh(); return true;
+        }
+        const url = URL.createObjectURL(new Blob([r.html], { type: "text/html" }));
+        $("#dlg-result").innerHTML = '<div class="pl-callout pl-callout--warning span2">The browser blocked the new tab. <a href="' + url + '" target="_blank" rel="noopener">Open the sheet of ' + esc(what) + "</a> and print from there.</div>";
+        await refresh(); return false;
+      },
     });
   }
   async function newBinsDialog() {
@@ -790,7 +835,7 @@ PAGE = r"""<!doctype html>
   }
 
   // ── wiring ───────────────────────────────────────────────────────────────────
-  const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
+  const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
     close: closeDrawer,
     price: (id) => priceDialog(id), sold: (id) => soldDialog(id), list: (id) => listingDialog(id),
@@ -798,7 +843,7 @@ PAGE = r"""<!doctype html>
     del: deleteItem, keep: (id) => setStatus(id, "kept"), withdraw: (id) => setStatus(id, "withdrawn"),
     available: (id) => setStatus(id, "available"), return: (id) => setStatus(id, "available"),
     editlot: (id) => lotDialog(state.lots.find((l) => l.id === id)), dellot: deleteLot,
-    newbins: () => newBinsDialog(), editbin: (id) => editBinDialog(id), delbin: deleteBin,
+    newbins: () => newBinsDialog(), printlabels: () => labelsDialog(), printlabel: (id) => labelsDialog(id), editbin: (id) => editBinDialog(id), delbin: deleteBin,
     movebin: (id) => moveDialog([id]), movesel: () => moveDialog(state.selected),
     movehere: (id) => startMove(id), endmove: () => { endMove(); render(); }, domove: () => doMove(),
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
@@ -883,7 +928,7 @@ PAGE = r"""<!doctype html>
 
 
 def build_view_router(cfg: dict):
-    """The PUBLIC page router — mounted at ``/plugins/inventory``; serves only the page."""
+    """The PUBLIC router — mounted at ``/plugins/inventory``: the page, and the bin-label hop."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
 
@@ -892,5 +937,21 @@ def build_view_router(cfg: dict):
     @r.get(VIEW_PATH, response_class=HTMLResponse, include_in_schema=False)
     async def _view():
         return HTMLResponse(PAGE)
+
+    # The one other public route: the address printed on a bin label. It takes nothing but a
+    # bin id, reads no data and echoes only that id, then hands off to the console (or says
+    # the console needs an update). no-store, so a label starts opening its bin the day the
+    # host learns how, with nothing cached in between.
+    @r.get(LABEL_PREFIX + "/{bin_id}", include_in_schema=False)
+    async def _label(bin_id: str):
+        from fastapi.responses import PlainTextResponse, RedirectResponse
+
+        bid = norm_bin_id(bin_id)
+        if bid is None:
+            return PlainTextResponse("Not a bin label.", status_code=404, headers={"Cache-Control": "no-store"})
+        target = view_target(bid)
+        if target:
+            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(older_host_page(bid, console_root()), headers={"Cache-Control": "no-store"})
 
     return r

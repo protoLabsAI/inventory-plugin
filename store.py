@@ -156,6 +156,8 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
             "UPDATE sales SET packed_on = CASE WHEN sold_on != '' THEN sold_on ELSE date('now') END",
         ),
     ),
+    # 0.7.0 — when a bin's label was last put on a printable sheet ('' = never).
+    ("bins", "labels_printed_on", ("ALTER TABLE bins ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -952,6 +954,21 @@ class InventoryStore:
             con.execute("DELETE FROM bins WHERE id=?", (bin_id,))
             self._audit(con, "bin", bin_id, "delete", actor, {"snapshot": dict(row)})
             return 1
+
+    def mark_labels_printed(self, bin_ids, *, actor: str = "") -> list[str]:
+        """Record that these bins' labels went onto a printable sheet today (audited)."""
+        ids = list(dict.fromkeys(self._bin_id(b) for b in (bin_ids or [])))
+        if not ids:
+            return []
+        today, ts = today_iso(), now_iso()
+        with self._tx() as con:
+            for b in ids:
+                if con.execute("SELECT 1 FROM bins WHERE id=?", (b,)).fetchone() is None:
+                    raise InventoryError(f"no bin {b!r}")
+            for b in ids:
+                con.execute("UPDATE bins SET labels_printed_on=?, updated_at=? WHERE id=?", (today, ts, b))
+                self._audit(con, "bin", b, "labels", actor, {"labels_printed_on": today})
+        return ids
 
     def list_bins(self) -> dict:
         """Every bin with what is in it (count of items, and the unsold value at target), plus
