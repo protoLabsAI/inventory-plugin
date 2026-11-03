@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import sys
 import types
+from pathlib import Path
 
 import inventory_plugin
 import pytest
@@ -220,3 +221,12 @@ def test_migration_adds_labels_printed_on_to_an_older_db(tmp_path):
     assert s.mark_labels_printed(["b01", "B01"], actor="t") == ["B01"]
     with pytest.raises(Exception, match="no bin"):
         s.mark_labels_printed(["B02"], actor="t")
+
+
+def test_the_manifest_exempts_exactly_the_label_hop_from_the_host_auth_gate():
+    # The host only auto-exempts `views:` paths. The hop is opened by the iPhone Camera app with
+    # no bearer, so it must be declared, and nothing broader than its own subtree may be.
+    import yaml
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "protoagent.plugin.yaml").read_text())
+    assert manifest["public_paths"] == ["/plugins/inventory/b/"]

@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.7.0
+version: 0.7.1
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -45,6 +45,12 @@ config:
 # serves at `path` (public prefix); its data comes through /api/plugins/inventory (gated).
 views:
   - { id: inventory, label: "Inventory", icon: Boxes, path: /plugins/inventory/view }
+
+# Bin-label hop (GET /plugins/inventory/b/<BIN>): the iPhone Camera app opens a printed QR with no
+# bearer, so the host auth gate must exempt it. Only `views:` paths are auto-exempted; without this
+# entry the route 401s on a token-gated host. It reads no data and answers the same for any valid id.
+public_paths:
+  - /plugins/inventory/b/
 
 # Editable in Settings ▸ Plugins (ADR 0019).
 settings:
