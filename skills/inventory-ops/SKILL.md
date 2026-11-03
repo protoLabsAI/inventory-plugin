@@ -77,3 +77,16 @@ the same tools and the same rules; the only thing it never does is touch a listi
 `inventory_import_csv(path=…)` maps common headers itself and reports `mapped_columns`,
 `ignored_columns` and per-line `warnings`. Read the warnings back to the operator; a
 row that failed is a row that is not in the inventory.
+
+## Scan turns
+
+The Inventory view's **Scan** uploads a photo, and the plugin starts a turn in that scan's
+own session with a prompt naming the scan id. In an **identify** turn: call
+`inventory_scan_photos(scan_id)`, then `inventory_scan_propose` once, or `inventory_scan_fail`
+with a reason when you can't tell. No eBay, Amazon, pricing tools or subagents, and at most
+two web searches to confirm a box's contents. `confidence` is how sure you are of the EXACT
+product; give up to 3 alternatives when unsure. For a box, list the pieces it splits into,
+with `model_count` 0 for anything you cannot see or confirm. Never pad the list. In a
+**pricing** turn, follow "Re-pricing an item" for each item listed, set no price below 3
+relevant sold comps, and finish with `inventory_scan_pricing_done(scan_id, unpriced)`. Don't
+message the operator from either turn; the view shows the result.
