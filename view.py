@@ -648,7 +648,7 @@ PAGE = r"""<!doctype html>
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
-    if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (hostOrigin() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
+    if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
     return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
   }
@@ -766,7 +766,8 @@ PAGE = r"""<!doctype html>
 
   // ── chat compose (protoAgent plugin-view bridge, protoagent:chat:compose) ───────────────
   // DRAFTS a message in the console's chat composer; the operator reviews it and sends. Never a
-  // send. Targeted at the console's own origin, never "*": no known host origin, no button.
+  // send. Aimed by composeTarget(): an http(s) console's exact origin, else "*" (see below); no
+  // button at all when the page isn't embedded.
   function hostOrigin() {
     try {
       if (window.parent === window) return "";
@@ -774,6 +775,16 @@ PAGE = r"""<!doctype html>
       const o = a || (document.referrer ? new URL(document.referrer).origin : "");
       return o && o !== "null" ? o : "";
     } catch (_) { return ""; }
+  }
+  // The target for a compose message. An http(s) console gets its exact origin. The desktop
+  // app's console is tauri://localhost, which a WebView can treat as an opaque origin, and a
+  // message aimed at that origin is dropped silently, so there we send to "*" the way the kit's
+  // own ready message does. The host still checks the message comes from THIS frame, and the
+  // text is item names this view fetched with the console's own token, sent only on a click.
+  function composeTarget() {
+    if (window.parent === window) return "";
+    const o = hostOrigin();
+    return /^https?:\/\//.test(o) ? o : "*";
   }
   const COMPOSE_MAX = 4000;  // the bridge takes plain text up to 4 KB
   function repriceText(items) {
@@ -789,7 +800,7 @@ PAGE = r"""<!doctype html>
     return head + body + (more ? "…and " + more + " more: use inventory_reprice_plan for the full list.\n" : "");
   }
   function composeToChat(text) {
-    const origin = hostOrigin(); if (!origin) { toast("Open this view inside the console to draft a chat message.", "warning"); return; }
+    const origin = composeTarget(); if (!origin) { toast("Open this view inside the console to draft a chat message.", "warning"); return; }
     window.parent.postMessage({ type: "protoagent:chat:compose", text: String(text).slice(0, COMPOSE_MAX) }, origin);
   }
 

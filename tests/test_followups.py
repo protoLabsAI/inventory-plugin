@@ -1,5 +1,6 @@
 """0.9.1: one Stale price setting for the view, the review and the tools; Ask for a re-price
-drafts in chat through the console bridge (never sends, never "*"); Edit never sets status."""
+drafts in chat through the console bridge (never sends; an http(s) console gets its exact origin, the
+desktop app's tauri:// console gets "*"); Edit never sets status."""
 
 from __future__ import annotations
 
@@ -65,7 +66,7 @@ def test_the_view_reads_the_setting_and_stale_defaults_to_it(tmp_path):
     assert {s["id"] for s in c30.get(api + "/stale").json()["stale_prices"]} == {"OLD", "NEW"}
 
 
-def test_the_page_posts_only_a_chat_compose_and_never_to_star():
+def test_the_page_posts_only_a_chat_compose_to_the_computed_target():
     from inventory_plugin.view import PAGE
 
     calls = re.findall(r"postMessage\(([^;]*)\);", PAGE)
@@ -84,3 +85,46 @@ def test_the_reprice_request_names_the_items_and_stays_under_4kb():
     assert len(out["many"]) <= 4000 and "…and " in out["many"] and "inventory_reprice_plan" in out["many"]
     assert "- Nobz (A1), now $30" in out["few"] and "inventory_set_price" in out["few"] and "1 item " in out["few"]
     assert out["top"] == ""  # not embedded: no host origin, so no button and no post
+
+
+def _compose_target(parent_is_self: bool, ancestor: str, referrer: str = "") -> str:
+    import json
+    import shutil
+    import subprocess
+
+    from inventory_plugin.view import PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    start = PAGE.index("  function hostOrigin() {")
+    end = PAGE.index("  const COMPOSE_MAX")
+    src = PAGE[start:end]
+    parent = "window" if parent_is_self else "self"
+    ancestors = json.dumps([ancestor] if ancestor else [])
+    env = (
+        f"const self = {{}}; const window = {{}}; window.parent = {parent};"
+        f"const location = {{ ancestorOrigins: {ancestors} }}; const document = {{ referrer: {json.dumps(referrer)} }};"
+    )
+    out = subprocess.run(
+        [node, "-e", env + src + "console.log(JSON.stringify(composeTarget()));"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+@pytest.mark.parametrize(
+    ("parent_is_self", "ancestor", "referrer", "want"),
+    [
+        (False, "https://hub.example.ts.net", "", "https://hub.example.ts.net"),
+        (False, "http://127.0.0.1:7881", "", "http://127.0.0.1:7881"),
+        # The desktop app's console: a custom scheme a WebView may treat as opaque, so "*".
+        (False, "tauri://localhost", "", "*"),
+        (False, "", "", "*"),  # embedded but the origin can't be read: still reach the host
+        (True, "", "", ""),  # not embedded: no button, no post
+    ],
+)
+def test_compose_targets_the_console_origin_and_falls_back_to_star_off_http(parent_is_self, ancestor, referrer, want):
+    assert _compose_target(parent_is_self, ancestor, referrer) == want
