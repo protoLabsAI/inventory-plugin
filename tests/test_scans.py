@@ -63,10 +63,10 @@ def test_a_box_scan_needs_what_was_paid_and_makes_its_lot_at_once(store):
         store.create_scan("box", paid=0, actor="t")
     with pytest.raises(InventoryError, match="money amount"):
         store.create_scan("box", paid="lots", actor="t")
-    s = store.create_scan("box", paid="101", source="LGS", name="Box scanned 11-03 14:20", actor="console")
+    s = store.create_scan("box", paid="42.50", source="LGS", name="Box scanned 11-03 14:20", actor="console")
     assert s["state"] == "new" and s["lot_id"] == "SCAN-" + s["id"][1:]
     lot = store.get_lot(s["lot_id"])
-    assert lot["name"] == "Box scanned 11-03 14:20" and lot["acquisition_cost"] == 101.0 and lot["source"] == "LGS"
+    assert lot["name"] == "Box scanned 11-03 14:20" and lot["acquisition_cost"] == 42.5 and lot["source"] == "LGS"
     assert [a["action"] for a in store.audit_log(entity_id=s["id"])] == ["create"]
 
 
@@ -97,7 +97,7 @@ def test_photo_lookups_refuse_anything_but_their_own_ids(store):
 
 
 def _box_proposed(store):
-    s = store.create_scan("box", paid=101, actor="console")
+    s = store.create_scan("box", paid=42, actor="console")
     store.add_scan_photo(s["id"], jpeg())
     return store.propose_scan(
         s["id"],
@@ -272,7 +272,7 @@ def test_discarding_an_unconfirmed_box_removes_its_empty_lot_pieces_and_photos(s
 # ── the turns the plugin starts ─────────────────────────────────────────────────
 def test_a_photo_starts_one_cheap_identification_turn_in_its_own_session(registry, host):
     c, _ = _client(registry)
-    s = c.post("/api/plugins/inventory/scans", json={"kind": "box", "paid": "101"}).json()["scan"]
+    s = c.post("/api/plugins/inventory/scans", json={"kind": "box", "paid": "42"}).json()["scan"]
     r = c.post(f"/api/plugins/inventory/scans/{s['id']}/photos", content=jpeg(), headers={"Content-Type": "image/jpeg"})
     assert r.status_code == 200 and r.json()["scan"]["state"] == "identifying"
     (call,) = host.calls
@@ -312,7 +312,7 @@ def test_a_refused_enqueue_is_reported_on_the_scan(store):
 
 def test_the_tools_round_trip_a_scan(registry, host):
     c, tools = _client(registry)
-    s = c.post("/api/plugins/inventory/scans", json={"kind": "box", "paid": 60}).json()["scan"]
+    s = c.post("/api/plugins/inventory/scans", json={"kind": "box", "paid": 33}).json()["scan"]
     c.post(f"/api/plugins/inventory/scans/{s['id']}/photos", content=jpeg())
     seen = tools["inventory_scan_photos"].invoke({"scan_id": s["id"]})
     env = json.loads(seen.split("]", 1)[1])

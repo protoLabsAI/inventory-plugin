@@ -75,7 +75,28 @@ PAGE = r"""<!doctype html>
   .form textarea{min-height:calc(var(--pl-space-12) * 2.5);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs)}
   .result{margin-top:var(--pl-space-3);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs);white-space:pre-wrap}
   textarea.copytext{width:100%;min-height:calc(var(--pl-space-12) * 3.5);font-family:var(--pl-font-mono);font-size:var(--pl-font-size-xs)}
-  @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}}
+  .form.one{grid-template-columns:1fr}
+  .block{width:100%;justify-content:center;min-height:var(--pl-space-12)}
+  .step-k{margin-bottom:var(--pl-space-2)}
+  .gap-t{margin-top:var(--pl-space-3)}
+  .thumb{display:block;width:100%;max-height:calc(var(--pl-space-12) * 5);object-fit:contain;margin:var(--pl-space-2) 0;background:var(--pl-color-bg-inset);border-radius:var(--pl-radius)}
+  .thumb.ph{display:flex;align-items:center;justify-content:center;height:calc(var(--pl-space-12) * 2);border:var(--pl-border-width) dashed var(--pl-color-border-strong);color:var(--pl-color-fg-muted);font-size:var(--pl-font-size-xs)}
+  .thumb.sm{flex:none;width:var(--pl-space-12);height:var(--pl-space-12);margin:0;object-fit:cover}
+  .skel-line{display:block;height:var(--pl-space-3);margin:var(--pl-space-1) 0}
+  .w60{width:60%}.w40{width:40%}
+  .unit{flex-wrap:wrap;gap:var(--pl-space-2);padding:var(--pl-space-2) 0}
+  .ubody{display:flex;align-items:center;gap:var(--pl-space-2);flex:1 1 14rem;min-width:0}
+  .uact{display:flex;align-items:center;gap:var(--pl-space-1);margin-left:auto}
+  .binsel{width:auto;max-width:12rem}
+  .tall{min-height:var(--pl-space-12);min-width:var(--pl-space-12)}
+  .big{font-size:var(--pl-font-size-lg);margin-top:var(--pl-space-2)}
+  .sc-sum{margin:var(--pl-space-3) 0 0}
+  .rgroup{display:grid;gap:var(--pl-space-2)}
+  .sc-foot{flex-direction:column}
+  .frow{display:flex;gap:var(--pl-space-2);width:100%}
+  .frow > *{flex:1 1 0}
+  .scanbar{display:none}
+  @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}.view .scan-top{display:none}.binsel{min-height:var(--pl-space-12)}.scanbar{display:block;padding:var(--pl-space-2) var(--pl-space-4) calc(var(--pl-space-2) + env(safe-area-inset-bottom));border-top:var(--pl-border-width) solid var(--pl-color-border);background:var(--pl-color-bg)}}
   @media (max-width:999px){.col-lot{display:none}}
   @media (prefers-reduced-motion:reduce){*{animation:none;transition:none}}
 </style>
@@ -90,6 +111,7 @@ PAGE = r"""<!doctype html>
   <div class="pl-panel-header pl-panel-header--compact">
     <h1 class="pl-panel-header__title">Inventory</h1>
     <div class="pl-panel-header__actions anchor">
+      <button class="pl-btn pl-btn--sm pl-btn--primary scan-top" data-act="scan">Scan</button>
       <button class="pl-btn pl-btn--sm pl-btn--ghost" id="more" aria-haspopup="menu" aria-expanded="false">More</button>
       <div class="pop" id="more-menu" hidden></div>
     </div>
@@ -102,6 +124,7 @@ PAGE = r"""<!doctype html>
   </div></div>
   <div id="err" class="pl-callout pl-callout--error" role="alert" hidden></div>
   <main class="main" id="main" role="tabpanel"></main>
+  <div class="scanbar"><button class="pl-btn pl-btn--primary block" data-act="scan">Scan</button></div>
 </div>
 <div id="overlay-root"></div>
 <div id="dialog-root"></div>
@@ -127,7 +150,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], scans: [], threshold: 0.7, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -257,7 +280,7 @@ PAGE = r"""<!doctype html>
       input = '<textarea class="pl-field__input" id="' + id + '" name="' + name + '" placeholder="' + esc(opts.placeholder || "") + '">' + esc(value) + "</textarea>";
     } else {
       input = '<input class="pl-field__input" id="' + id + '" name="' + name + '" type="' + (opts.type || "text") + '" value="' + esc(value) + '"' +
-        (opts.step ? ' step="' + opts.step + '"' : "") + (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.list ? ' list="' + esc(opts.list) + '"' : "") + (opts.required ? " required" : "") + (opts.readonly ? " readonly" : "") + ">";
+        (opts.step ? ' step="' + opts.step + '"' : "") + (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.list ? ' list="' + esc(opts.list) + '"' : "") + (opts.inputmode ? ' inputmode="' + esc(opts.inputmode) + '"' : "") + (opts.required ? " required" : "") + (opts.readonly ? " readonly" : "") + ">";
     }
     return '<label class="pl-field' + (opts.span2 ? " span2" : "") + '"><span class="pl-field__label">' + esc(label) + "</span>" + input +
       (opts.hint ? '<span class="pl-field__hint">' + esc(opts.hint) + "</span>" : "") + "</label>";
@@ -294,6 +317,10 @@ PAGE = r"""<!doctype html>
   // ── drawer: the one surface for an item, a lot, and the history ──────────────
   let lastFocus = null;
   function closeDrawer() {
+    if (state.drawer && state.drawer.kind === "scan") {
+      stopPoll();
+      if (SC.id && !(SC.data && SC.data.finished_at)) { toast("Saved. Pick it up from Next, under Needs a look"); setTimeout(refresh, 0); }
+    }
     state.drawer = null; $("#overlay-root").innerHTML = "";
     const again = lastFocus && lastFocus.dataset && lastFocus.dataset.item ? document.querySelector('[data-item="' + CSS.escape(lastFocus.dataset.item) + '"]') : lastFocus;
     if (again && again.isConnected) again.focus();
@@ -429,9 +456,10 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack")]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
+    state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
@@ -455,6 +483,7 @@ PAGE = r"""<!doctype html>
       else if (d && d.kind === "lot") openLot(d.id);
       else if (d && d.kind === "bin") openBin(d.id);
       else if (d && d.kind === "history") openHistory();
+      else if (d && d.kind === "scan") scPaint();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
 
@@ -467,6 +496,10 @@ PAGE = r"""<!doctype html>
     dl.innerHTML = state.systems.map((s) => '<option value="' + esc(s) + '">').join("");
     let cdl = document.getElementById("conditions-dl"); if (!cdl) { cdl = document.createElement("datalist"); cdl.id = "conditions-dl"; document.body.appendChild(cdl); }
     cdl.innerHTML = [...new Set([...CONDITION_CODES, ...state.conditions])].map((c) => '<option value="' + esc(c) + '">').join("");
+    let ndl = document.getElementById("names-dl"); if (!ndl) { ndl = document.createElement("datalist"); ndl.id = "names-dl"; document.body.appendChild(ndl); }
+    ndl.innerHTML = [...new Set(state.items.map((i) => i.name))].slice(0, 400).map((n) => '<option value="' + esc(n) + '">').join("");
+    let sdl = document.getElementById("sources-dl"); if (!sdl) { sdl = document.createElement("datalist"); sdl.id = "sources-dl"; document.body.appendChild(sdl); }
+    sdl.innerHTML = [...new Set(state.lots.map((l) => clean(l.source)).filter(Boolean))].map((n) => '<option value="' + esc(n) + '">').join("");
     document.querySelectorAll("#tabs .pl-tab").forEach((b) => { const on = b.dataset.tab === state.tab; b.classList.toggle("pl-tab--active", on); b.setAttribute("aria-selected", String(on)); b.tabIndex = on ? 0 : -1; });
     const main = $("#main");
     if (state.tab === "next") main.innerHTML = renderNext();
@@ -487,6 +520,10 @@ PAGE = r"""<!doctype html>
       const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
         sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
       h += sec("To pack", state.toPack.length, rows, "");
+    }
+    if (state.scans.length) {
+      const rows = state.scans.slice(0, ROW_CAP).map((s) => '<li><button class="irow" data-act="resumescan" data-id="' + esc(s.id) + '"><span class="irow-main"><span class="irow-name">' + esc(scanTitle(s)) + '</span><span class="irow-sub">' + esc(scanSub(s)) + "</span></span>" + (scanNeedsCheck(s) ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join("");
+      h += sec("Needs a look", state.scans.length, rows, "");
     }
     const ready = readyToList(items);
     if (ready.length) h += sec("Ready to list", ready.length, ready.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, clean(i.condition) || clean(i.system)) + "</li>").join(""), "ready");
@@ -510,7 +547,7 @@ PAGE = r"""<!doctype html>
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
     if (stale) chores.push('<li><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button></li>');
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
-    return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Nothing to pack, no priced stock to list and nothing to split.</div></div>';
+    return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
   }
   function chipsHtml() {
     const f = state.f, chips = [];
@@ -834,6 +871,346 @@ PAGE = r"""<!doctype html>
     } catch (e) { toast(e.message || String(e), "error"); }
   }
 
+  // ── scan: photo intake (spec §3). The agent identifies in the background; the flow polls. ──
+  const POLL_MS = 2500;
+  const SC = { id: "", kind: "", step: 1, file: null, fileUrl: "", data: null, units: [], merged: false, boxName: "", boxHow: "", boxSystem: "", boxCondition: "", lotId: "", lastBin: "", bins: {}, pick: false, timer: 0, busy: false, sig: "" };
+  const thumbs = new Map();  // photo id → object URL (null while loading)
+  function stopPoll() { if (SC.timer) clearTimeout(SC.timer); SC.timer = 0; }
+  function scReset() {
+    stopPoll();
+    if (SC.fileUrl) URL.revokeObjectURL(SC.fileUrl);
+    Object.assign(SC, { id: "", kind: "", step: 1, file: null, fileUrl: "", data: null, units: [], merged: false, boxName: "", boxHow: "", boxSystem: "", boxCondition: "", lotId: "", lastBin: "", bins: {}, pick: false, busy: false, sig: "" });
+  }
+  const scanOpen = () => !!(state.drawer && state.drawer.kind === "scan");
+  const scanPending = (s) => !!s && (s.state === "identifying" || (s.units || []).some((u) => u.state === "identifying") || !!(s.pricing && s.pricing.state === "queued"));
+  const confident = (p) => !!p && Number(p.confidence) >= state.threshold;
+  async function upload(scanId, file) {
+    const r = await kit.apiFetch(API + "/scans/" + encodeURIComponent(scanId) + "/photos", { method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file });
+    const text = await r.text();
+    let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+    if (!r.ok) throw new Error((data && (data.detail || data.error)) || (r.status + " " + r.statusText));
+    return data;
+  }
+  function photoSrc(scanId, photoId) {
+    if (thumbs.has(photoId)) return thumbs.get(photoId) || "";
+    thumbs.set(photoId, null);
+    kit.apiFetch(API + "/scans/" + encodeURIComponent(scanId) + "/photos/" + encodeURIComponent(photoId))
+      .then((r) => (r.ok ? r.blob() : null))
+      .then((b) => { if (b) { thumbs.set(photoId, URL.createObjectURL(b)); if (scanOpen()) scPaint(); } else thumbs.delete(photoId); })
+      .catch(() => thumbs.delete(photoId));
+    return "";
+  }
+  const thumbImg = (s, cls = "thumb") => {
+    const p = s && s.photos && s.photos[s.photos.length - 1];
+    const src = p ? photoSrc(s.id, p.id) : "";
+    return src ? '<img class="' + cls + '" src="' + esc(src) + '" alt="">' : '<span class="' + cls + ' ph" aria-hidden="true"></span>';
+  };
+  // The breakdown rows: the agent's proposed contents (once), every piece photographed into the
+  // box, and anything added by name. Local choices (Keep/Sell, a corrected name) survive polls.
+  function mergeUnits() {
+    const s = SC.data; if (!s) return;
+    if (s.kind === "unit") return;
+    const p = s.proposal;
+    if (!SC.merged && p && (p.contents || []).length) {
+      SC.merged = true;
+      for (const [k, c] of p.contents.entries()) SC.units.push({ key: "c" + k, name: c.name, quantity: c.quantity || 1, category: c.category, system: c.system, condition: c.condition, model_count: c.model_count || 0, keep: false, state: "ok" });
+    }
+    for (const u of s.units || []) {
+      let row = SC.units.find((r) => r.scan_id === u.id);
+      if (!row) { row = { key: u.id, scan_id: u.id, name: "", quantity: 1, keep: false, state: "identifying" }; SC.units.push(row); }
+      row.photo = u;
+      if (row.named) { row.state = "ok"; continue; }
+      const up = u.proposal;
+      if (u.state === "identifying" || u.state === "new") row.state = "identifying";
+      else if (u.state === "failed") row.state = "failed";
+      else if (up) { row.name = up.name; row.system = up.system; row.category = up.category; row.condition = up.condition; row.alts = up.alternatives || []; row.state = confident(up) ? "ok" : "check"; if (row.state === "ok") absorb(row); }
+    }
+  }
+  // A piece photographed into the box is often one the agent already listed: once its name
+  // matches a listed row, the photographed row absorbs it (keeping that row's Keep/Sell and count).
+  function absorb(row) {
+    const key = clean(row.name).toLowerCase(); if (!key) return;
+    const twin = SC.units.find((r) => r !== row && !r.scan_id && clean(r.name).toLowerCase() === key);
+    if (!twin) return;
+    row.keep = twin.keep; row.quantity = twin.quantity || row.quantity; row.category = row.category || twin.category; row.model_count = row.model_count || twin.model_count;
+    SC.units = SC.units.filter((r) => r !== twin);
+  }
+  async function loadScan() {
+    const { scan } = await api("/scans/" + encodeURIComponent(SC.id));
+    SC.data = scan; SC.kind = scan.kind; SC.lotId = scan.lot_id || SC.lotId;
+    mergeUnits();
+  }
+  function poll() {
+    stopPoll();
+    if (!SC.id || !scanOpen() || !scanPending(SC.data)) return;
+    SC.timer = setTimeout(async () => {
+      SC.timer = 0;
+      if (document.hidden || !scanOpen()) return;  // visibilitychange resumes it
+      try {
+        const before = JSON.stringify(SC.data);
+        await loadScan();
+        if (SC.data && SC.data.pricing) { const [it, sm] = await Promise.all([api("/items?limit=5000"), api("/summary")]); state.items = it.items; state.summary = sm; }
+        if (JSON.stringify(SC.data) !== before || SC.step === 5) scPaint();
+        announce();
+      } catch (e) { toast(e.message, "error"); }
+      poll();
+    }, POLL_MS);
+  }
+  let lastSaid = "";
+  function announce() {
+    const s = SC.data; if (!s) return;
+    const said = s.state === "proposed" && s.proposal ? "Identified: " + s.proposal.name : s.state === "failed" ? "Couldn't identify it" : "";
+    if (said && said !== lastSaid) { lastSaid = said; const live = $("#sc-live"); if (live) live.textContent = said; }
+  }
+  const rc = (name, v, title, blurb, on) => '<label class="pl-radiocard' + (on ? " pl-radiocard--selected" : "") + '"><input class="pl-radiocard__input" type="radio" name="' + esc(name) + '" value="' + esc(v) + '"' + (on ? " checked" : "") + '><span class="pl-radiocard__title">' + esc(title) + "</span>" + (blurb ? '<span class="pl-radiocard__blurb">' + esc(blurb) + "</span>" : "") + "</label>";
+  const capBtn = (what, label, primary = true) => '<label class="pl-btn' + (primary ? " pl-btn--primary" : "") + ' block"><input type="file" accept="image/*" capture="environment" class="sr-only" data-cap="' + what + '">' + esc(label) + "</label>";
+  const btnP = (act, label, disabled = false) => '<button class="pl-btn pl-btn--primary block" data-act="' + act + '"' + (disabled ? " disabled" : "") + ">" + esc(label) + "</button>";
+  const btn = (act, label) => '<button class="pl-btn block" data-act="' + act + '">' + esc(label) + "</button>";
+  const discard = () => (SC.id && !(SC.data && SC.data.state === "confirmed") ? '<button class="pl-btn pl-btn--ghost pl-btn--sm" data-act="sc-discard">Discard this scan</button>' : "");
+  const lotLine = () => { const l = state.lots.find((x) => x.id === SC.lotId); return l ? '<p class="muted">' + esc(l.name) + (l.acquisition_cost ? " · " + esc(whole(l.acquisition_cost)) + " cost" : "") + "</p>" : ""; };
+  const skel = '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span><span class="pl-skel skel-line w40"></span></div>';
+  const scanItems = () => ((SC.data && SC.data.item_ids) || []).map(itemById).filter(Boolean);
+  const unitLabel = (u) => (u.state === "identifying" && !u.name ? "Identifying…" : u.state === "failed" && !u.named ? "Couldn't identify" : u.name + (u.state === "check" ? "?" : ""));
+  function unitRow(u) {
+    const name = u.state === "identifying" && !u.name ? skel + '<span class="sr-only">Identifying</span>' : '<span class="irow-name">' + esc(unitLabel(u)) + (u.quantity > 1 ? ' <span class="muted">×' + esc(u.quantity) + "</span>" : "") + "</span>";
+    const sub = u.state === "identifying" ? "Identifying…" : u.state === "check" ? "Not sure. Tap Check" : u.state === "failed" ? "Type the name or retake" : clean(u.condition) || clean(u.category);
+    const fix = u.state === "check" || u.state === "failed" ? '<button class="pl-btn pl-btn--sm tall" data-act="sc-fix" data-id="' + esc(u.key) + '"><span class="pl-badge pl-badge--warning">check</span></button>' : "";
+    const seg = '<div class="pl-segmented" role="group" aria-label="Keep or sell ' + esc(u.name || "this piece") + '"><button class="pl-segmented__btn tall' + (u.keep ? " pl-segmented__btn--active" : "") + '" data-act="sc-keep" data-id="' + esc(u.key) + '" aria-pressed="' + u.keep + '">Keep</button><button class="pl-segmented__btn tall' + (!u.keep ? " pl-segmented__btn--active" : "") + '" data-act="sc-sell" data-id="' + esc(u.key) + '" aria-pressed="' + !u.keep + '">Sell</button></div>';
+    return '<li class="unit"><div class="ubody">' + (u.photo ? thumbImg(u.photo, "thumb sm") : "") + '<div class="irow-main">' + name + '<span class="irow-sub">' + esc(sub) + "</span></div>" + fix + '</div><div class="uact">' + seg +
+      '<button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="sc-remove" data-id="' + esc(u.key) + '" aria-label="Remove ' + esc(u.name || "this piece") + '">Remove</button></div></li>';
+  }
+  const SCREENS = {
+    1: () => ['<h3 class="dh">What are you scanning?</h3><div class="pl-radiocard-group rgroup" role="radiogroup" aria-label="What are you scanning">' +
+      rc("sc-kind", "box", "New box I bought", "Starts a lot: photo and price, then break it down.", SC.kind === "box") +
+      rc("sc-kind", "unit", "Single piece", "One unit, into a lot or none.", SC.kind === "unit") + "</div>" +
+      '<p class="muted gap-t">Bin labels open from the iPhone Camera app: point it at a label.</p>', btnP("sc-next", "Continue", !SC.kind)],
+    2: () => {
+      const box = SC.kind === "box";
+      const have = SC.data && SC.data.photos && SC.data.photos.length;
+      const shot = SC.fileUrl ? '<img class="thumb" src="' + esc(SC.fileUrl) + '" alt="The photo to identify">' : have ? thumbImg(SC.data) : "";
+      let h = '<h3 class="dh">' + (box ? "The box" : "The piece") + "</h3>" + shot + capBtn("sc-photo", shot ? "Retake" : box ? "Take a photo of the box" : "Take a photo of the piece", !shot);
+      if (!SC.id) h += '<div class="form one gap-t">' + (box
+        ? field("sc_paid", "What did you pay? ($)", "", { required: true, inputmode: "decimal", placeholder: "45.00" }) + field("sc_source", "Where from? (optional)", "", { list: "sources-dl", placeholder: "LGS, eBay lot, GW webstore" })
+        : field("sc_lot", "Lot (optional)", SC.lotId, { type: "select", options: lotOptions(SC.lotId) })) + "</div>";
+      else h += lotLine();
+      return [h, btnP("sc-identify", "Identify") + discard()];
+    },
+    3: () => {
+      const s = SC.data, p = s && s.proposal, box = SC.kind === "box";
+      let h = lotLine() + thumbImg(s);
+      let foot = "";
+      if (!s || s.state === "identifying" || s.state === "new") {
+        h += skel + '<p class="muted">Identifying… usually under a minute.' + (box ? " You can break it down meanwhile." : " You can close this; it finishes in the background.") + "</p>";
+        foot = box ? btnP("sc-break", "Break it down") : btn("close", "Close");
+      } else if (s.state === "failed") {
+        h += '<div class="pl-callout pl-callout--error"><div class="pl-callout__body">' + esc(s.reason || "Couldn't identify it.") + '</div></div><div class="form one gap-t">' + field("sc_name", "Name", "", { list: "names-dl", placeholder: "Type what it is" }) + "</div>";
+        foot = btnP("sc-typed", "Use this name") + '<div class="frow">' + capBtn("sc-photo", "Retake photo", false) + btn("sc-retry", "Retry") + "</div>";
+      } else if (s.state === "proposed" && confident(p) && !SC.pick) {
+        h += '<h3 class="dh big">' + esc(p.name) + "</h3>" + (p.system ? '<span class="pl-tag">' + esc(p.system) + "</span>" : "") +
+          '<p class="muted">' + esc(p.notes || "Confident match") + "</p>" + (box && (p.contents || []).length ? '<p class="muted">' + esc(p.contents.length) + " pieces proposed</p>" : "");
+        foot = btnP("sc-accept", "Looks right") + btn("sc-notit", "Not it");
+      } else {
+        const names = [p.name, ...(p.alternatives || []).map((a) => a.name)].filter(Boolean);
+        h += '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body">Not sure. Pick one or type it.</div></div><div class="pl-radiocard-group rgroup gap-t" role="radiogroup" aria-label="Which is it">' +
+          names.map((n, k) => rc("sc-alt", n, n, k === 0 ? "The agent's best guess" : "", false)).join("") + '</div><div class="form one gap-t">' + field("sc_name", "Or type it", "", { list: "names-dl" }) + "</div>";
+        foot = btnP("sc-pick", "Confirm") + capBtn("sc-photo", "Retake photo", false);
+      }
+      return [h + '<div class="sr-only" id="sc-live" aria-live="polite"></div>', foot + discard()];
+    },
+    4: () => {
+      const box = SC.kind === "box";
+      const sell = SC.units.filter((u) => !u.keep).length, kept = SC.units.length - sell;
+      let h = '<h3 class="dh">' + (box ? "Keep this, sell that" : "Keep or sell?") + "</h3>" + (box && SC.boxName ? '<p class="muted">' + esc(SC.boxName) + "</p>" : lotLine()) +
+        (box && !SC.boxName ? '<p class="muted">The box is still being named. You can confirm its name at the end.</p>' : "");
+      h += SC.units.length ? '<ul class="list gap-t">' + SC.units.map(unitRow).join("") + "</ul>" : '<p class="muted gap-t">' + (SC.data && SC.data.state === "identifying" ? "Waiting for the agent's list of pieces. Or photograph them yourself." : "Add each piece you split out of the box.") + "</p>";
+      if (box) h += '<div class="drow gap-t">' + capBtn("sc-piece", "+ Photo of a piece", false) + '<button class="pl-btn block" data-act="sc-addname">+ Add by name</button></div>';
+      h += '<p class="sc-sum"><strong>' + sell + " to sell · " + kept + " kept</strong></p>";
+      return [h, btnP("sc-confirm", sell ? "Price the sell pile" : "Save") + discard()];
+    },
+    5: () => {
+      const pr = (SC.data && SC.data.pricing) || {};
+      const unpriced = new Map((pr.unpriced || []).map((u) => [u.item_id, u.reason]));
+      const items = scanItems().filter((i) => UNSOLD.includes(i.status));
+      const l = state.summary && state.summary.lots.find((x) => x.id === SC.lotId);
+      let h = l ? stats([[fmt(l.acquisition_cost), "Lot cost"], [fmt(l.remaining.target), "At target"], [signed(l.projected_net_at_target), "Projected net", "", l.projected_net_at_target < 0]], 3) : "";
+      if (pr.state === "failed") h += '<div class="pl-callout pl-callout--warning gap-t"><div class="pl-callout__body">' + esc(pr.reason || "Pricing didn't finish.") + '</div></div><button class="pl-btn pl-btn--sm gap-t" data-act="sc-reprice">Retry pricing</button>';
+      if (pr.state === "queued") h += '<p class="muted gap-t" aria-live="polite">Checking eBay sold comps. This can take a few minutes; you can bin the pieces meanwhile.</p>';
+      h += '<ul class="list gap-t">' + items.map((i) => {
+        const sub = i.target != null ? clean(i.price_basis) : pr.state === "queued" ? "Pricing…" : unpriced.has(i.id) ? "No comps yet · " + unpriced.get(i.id) : "No comps yet";
+        const right = i.target != null ? '<button class="pl-btn pl-btn--ghost pl-btn--sm money" data-act="price" data-id="' + esc(i.id) + '">' + esc(whole(i.target)) + "</button>" : pr.state === "queued" ? "" : '<button class="pl-btn pl-btn--sm" data-act="price" data-id="' + esc(i.id) + '">Set price</button>';
+        return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + esc(sub) + "</span></div>" + right + "</li>";
+      }).join("") + '</ul><p class="muted">Tap a price to change it. A price always keeps its basis.</p>';
+      return [h, btnP("sc-tobins", "Bin them")];
+    },
+    6: () => {
+      const items = scanItems();
+      if (!state.bins.length) return ['<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Make a few, then put each piece in one.</div></div>', btnP("newbins", "New bins") + btn("sc-done", "Finish without bins")];
+      const sel = (i) => {
+        const sellable = UNSOLD.includes(i.status);
+        const cur = SC.bins[i.id] !== undefined ? SC.bins[i.id] : i.bin_id || (sellable ? SC.lastBin : "");
+        return '<select class="pl-select binsel" data-binsel="' + esc(i.id) + '" data-sell="' + (sellable ? 1 : 0) + '" aria-label="Bin for ' + esc(i.name) + '"><option value="">' + (sellable ? "Pick a bin" : "Not binned") + "</option>" +
+          sortBins(state.bins).map((b) => '<option value="' + esc(b.id) + '"' + (cur === b.id ? " selected" : "") + ">" + esc(binText(b.id)) + "</option>").join("") + "</select>";
+      };
+      const row = (i) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + (UNSOLD.includes(i.status) ? "to sell" : "kept") + "</span></div>" + sel(i) + "</li>";
+      const sells = items.filter((i) => UNSOLD.includes(i.status)), kept = items.filter((i) => !UNSOLD.includes(i.status));
+      return ['<h3 class="dh">Put each piece in a bin</h3><p class="muted">After the first, each piece defaults to the last bin you picked.</p>' +
+        (sells.length ? '<ul class="list">' + sells.map(row).join("") + "</ul>" : "") + (kept.length ? '<div class="pl-eyebrow gap-t">Kept (optional)</div><ul class="list">' + kept.map(row).join("") + "</ul>" : ""), btnP("sc-done", "Done") + (sells.length ? btn("sc-toprices", "Back to prices") : "")];
+    },
+  };
+  function scPaint() {
+    if (!scanOpen()) return;
+    const keep = {}; document.querySelectorAll("#scan-flow input[id^='f_sc_'], #scan-flow select[id^='f_sc_']").forEach((el) => (keep[el.id] = el.value));
+    const radio = document.querySelector("#scan-flow input[name='sc-alt']:checked");
+    const focus = document.activeElement && document.activeElement.id;
+    const [body, foot] = SCREENS[SC.step]();
+    paintDrawer("Scan", '<div id="scan-flow"><div class="pl-eyebrow step-k">Step ' + SC.step + " of 6</div>" + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+    for (const [id, v] of Object.entries(keep)) { const el = document.getElementById(id); if (el) el.value = v; }
+    if (radio) { const r = document.querySelector("#scan-flow input[name='sc-alt'][value='" + CSS.escape(radio.value) + "']"); if (r) r.checked = true; }
+    if (focus) { const el = document.getElementById(focus); if (el && el.closest("#overlay-root")) el.focus(); }
+  }
+  function openScanFlow() { ++drawerSeq; state.drawer = { kind: "scan" }; scPaint(); poll(); }
+  function startScan() { scReset(); lastSaid = ""; openScanFlow(); }
+  function stepFor(s) {
+    const p = s.proposal;
+    if (s.state === "new") return 2;
+    if (s.state === "confirmed") { const sell = scanItems().filter((i) => UNSOLD.includes(i.status)); return sell.length && ((s.pricing && s.pricing.state === "queued") || sell.some((i) => i.target == null)) ? 5 : 6; }
+    const sure = s.kind === "box" && s.state === "proposed" && confident(p);
+    if (sure) { SC.boxName = p.name; SC.boxHow = "accepted"; SC.boxSystem = p.system; SC.boxCondition = p.condition; }
+    return s.kind === "box" && (sure || (s.units || []).length) ? 4 : 3;
+  }
+  async function resumeScan(id) {
+    scReset(); lastSaid = "";
+    try { SC.id = id; await loadScan(); SC.step = stepFor(SC.data); openScanFlow(); } catch (e) { scReset(); toast(e.message, "error"); }
+  }
+  function named(name, how) {
+    const p = SC.data && SC.data.proposal;
+    SC.boxName = name; SC.boxHow = how; SC.boxSystem = (p && p.system) || ""; SC.boxCondition = (p && p.condition) || "";
+    if (SC.kind === "unit") SC.units = [{ key: "self", name, quantity: 1, keep: false, state: "ok", system: SC.boxSystem, condition: SC.boxCondition, category: (p && p.category) || "", named: true }];
+    SC.step = 4; SC.pick = false; scPaint(); poll();
+  }
+  const unitByKey = (k) => SC.units.find((u) => u.key === k);
+  async function fixUnit(key) {
+    const u = unitByKey(key); if (!u) return;
+    const names = [u.state === "check" ? u.name : "", ...(u.alts || []).map((a) => a.name)].filter(Boolean);
+    await dialog({
+      title: u.state === "failed" ? "Couldn't identify this piece" : "Not sure. Pick one or type it", submit: "Use this",
+      body: (names.length ? '<div class="pl-radiocard-group rgroup span2" role="radiogroup" aria-label="Which is it">' + names.map((n, k) => rc("alt", n, n, k === 0 ? "The agent's best guess" : "", false)).join("") + "</div>" : "") +
+        field("typed", names.length ? "Or type it" : "Name", "", { span2: true, list: "names-dl" }),
+      onSubmit: async (v) => { const n = clean(v.typed || v.alt); if (!n) throw new Error("Pick one or type the name"); u.name = n; u.named = true; u.state = "ok"; absorb(u); scPaint(); },
+    });
+  }
+  async function confirmScan() {
+    if (SC.busy) return;
+    if (!SC.units.length) return toast("Add at least one piece. The box itself counts if you sell it whole", "warning");
+    if (SC.units.some((u) => !u.named && (u.state === "identifying" || u.state === "failed" || u.state === "check"))) return toast("Some pieces still need a name: wait for them, or tap Check", "warning");
+    let name = SC.kind === "box" ? SC.boxName : SC.units[0].name;
+    if (SC.kind === "box" && !name) {
+      const p = SC.data && SC.data.proposal;
+      const ok = await dialog({ title: "What is the box?", submit: "Use this name", body: field("n", "Name", (p && p.name) || "", { required: true, span2: true, list: "names-dl" }),
+        onSubmit: async (v) => { if (!clean(v.n)) throw new Error("Type the box's name"); name = clean(v.n); SC.boxName = name; SC.boxHow = p && p.name === name ? "accepted" : "typed"; } });
+      if (!ok || !name) return;
+    }
+    const units = SC.units.map((u) => ({ name: u.name, quantity: u.quantity || 1, keep: !!u.keep, scan_id: u.scan_id || "", category: u.category || "", system: u.system || "", condition: u.condition || "", model_count: u.model_count || 0 }));
+    const body = SC.kind === "box" ? { name, how: SC.boxHow, system: SC.boxSystem, condition: SC.boxCondition, units } : { ...units[0], name, how: SC.boxHow, lot_id: SC.lotId };
+    SC.busy = true;
+    try {
+      SC.data = (await api("/scans/" + encodeURIComponent(SC.id) + "/confirm", "POST", body)).scan;
+      await loadCore();
+      if (units.some((u) => !u.keep)) { SC.data = (await api("/scans/" + encodeURIComponent(SC.id) + "/price", "POST")).scan; SC.step = 5; } else SC.step = 6;
+    } catch (e) { toast(e.message, "error"); } finally { SC.busy = false; }
+    scPaint(); poll();
+  }
+  async function finishScan() {
+    const placements = {};
+    document.querySelectorAll("#scan-flow [data-binsel]").forEach((el) => { if (el.value) placements[el.dataset.binsel] = el.value; });
+    try {
+      const { scan } = await api("/scans/" + encodeURIComponent(SC.id) + "/finish", "POST", { placements });
+      const items = scan.item_ids.map(itemById).filter(Boolean), sold = items.filter((i) => UNSOLD.includes(i.status)).length, kept = items.length - sold;
+      const binned = Object.keys(placements).length, binsUsed = [...new Set(Object.values(placements))];
+      toast(clean(lotName(SC.lotId) || SC.boxName) + ": " + binned + " binned" + (binsUsed.length === 1 ? " in " + binsUsed[0] : "") + (kept ? ", " + kept + " kept" : ""), "success");
+      scReset(); closeDrawer(); await refresh();
+    } catch (e) { toast(e.message, "error"); }
+  }
+  async function scanPhoto(file) {
+    if (!file) return;
+    if (!SC.id) { if (SC.fileUrl) URL.revokeObjectURL(SC.fileUrl); SC.file = file; SC.fileUrl = URL.createObjectURL(file); return scPaint(); }
+    try { SC.data = (await upload(SC.id, file)).scan; mergeUnits(); if (SC.step === 2) SC.step = 3; SC.pick = false; } catch (e) { toast(e.message, "error"); }
+    scPaint(); poll();
+  }
+  async function identify() {
+    if (SC.busy) return;
+    if (SC.id) return SC.data && SC.data.photos.length ? (SC.step = 3, scPaint(), poll()) : toast("Take the photo first", "warning");
+    if (!SC.file) return toast("Take the photo first", "warning");
+    const paid = SC.kind === "box" ? ($("#f_sc_paid") || {}).value || "" : "";
+    if (SC.kind === "box" && !(Number(String(paid).replace(/[$,\s]/g, "")) > 0)) return toast("Say what you paid. It becomes the lot cost", "warning");
+    const d = new Date(), stamp = (d.getMonth() + 1 + "").padStart(2, "0") + "-" + (d.getDate() + "").padStart(2, "0") + " " + (d.getHours() + "").padStart(2, "0") + ":" + (d.getMinutes() + "").padStart(2, "0");
+    SC.busy = true;
+    try {
+      const body = SC.kind === "box" ? { kind: "box", paid, source: ($("#f_sc_source") || {}).value || "", name: "Box scanned " + stamp } : { kind: "unit", lot_id: ($("#f_sc_lot") || {}).value || "" };
+      const { scan } = await api("/scans", "POST", body);
+      SC.id = scan.id; SC.data = scan; SC.lotId = scan.lot_id;
+      SC.data = (await upload(SC.id, SC.file)).scan;
+      SC.step = 3;
+      loadCore().then(() => scanOpen() && scPaint()).catch(() => {});
+    } catch (e) { toast(e.message, "error"); } finally { SC.busy = false; }
+    scPaint(); poll();
+  }
+  async function addPiece(file) {
+    if (!file) return;
+    try {
+      const { scan } = await api("/scans", "POST", { kind: "unit", parent_id: SC.id });
+      await upload(scan.id, file);
+      await loadScan();
+    } catch (e) { toast(e.message, "error"); }
+    scPaint(); poll();
+  }
+  async function discardScan() {
+    if (!(await confirm("Discard this scan?", "Its photos go, and so does the box's lot if nothing else is in it. Nothing you already confirmed is touched.", "Discard"))) return;
+    try { await api("/scans/" + encodeURIComponent(SC.id), "DELETE"); scReset(); closeDrawer(); toast("Scan discarded", "success"); } catch (e) { toast(e.message, "error"); }
+    await refresh();
+  }
+  const SCAN_ACTS = {
+    scan: () => startScan(),
+    resumescan: (id) => resumeScan(id),
+    "sc-next": () => { if (!SC.kind) return; SC.step = 2; scPaint(); },
+    "sc-identify": () => identify(),
+    "sc-break": () => { SC.step = 4; scPaint(); poll(); },
+    "sc-accept": () => named(SC.data.proposal.name, "accepted"),
+    "sc-notit": () => { SC.pick = true; scPaint(); },
+    "sc-pick": () => {
+      const typed = clean(($("#f_sc_name") || {}).value), r = document.querySelector("#scan-flow input[name='sc-alt']:checked");
+      const n = typed || (r && r.value); if (!n) return toast("Pick one or type the name", "warning");
+      named(n, typed ? "typed" : n === (SC.data.proposal || {}).name ? "accepted" : "alternative");
+    },
+    "sc-typed": () => { const n = clean(($("#f_sc_name") || {}).value); if (!n) return toast("Type the name first", "warning"); named(n, "typed"); },
+    "sc-retry": async () => { try { SC.data = (await api("/scans/" + encodeURIComponent(SC.id) + "/retry", "POST")).scan; } catch (e) { toast(e.message, "error"); } scPaint(); poll(); },
+    "sc-keep": (k) => { const u = unitByKey(k); if (u) { u.keep = true; scPaint(); } },
+    "sc-sell": (k) => { const u = unitByKey(k); if (u) { u.keep = false; scPaint(); } },
+    "sc-remove": (k) => { SC.units = SC.units.filter((u) => u.key !== k); scPaint(); },
+    "sc-fix": (k) => fixUnit(k),
+    "sc-addname": async () => {
+      await dialog({ title: "Add a piece", submit: "Add", body: field("n", "Name", "", { required: true, span2: true, list: "names-dl" }) + field("q", "Quantity", 1, { type: "number", step: "1" }),
+        onSubmit: async (v) => { const n = clean(v.n); if (!n) throw new Error("Type the piece's name"); SC.units.push({ key: "n" + Date.now(), name: n, quantity: Math.max(1, Number(v.q) || 1), keep: false, state: "ok", named: true }); scPaint(); } });
+    },
+    "sc-confirm": () => confirmScan(),
+    "sc-reprice": async () => { try { SC.data = (await api("/scans/" + encodeURIComponent(SC.id) + "/price", "POST")).scan; } catch (e) { toast(e.message, "error"); } scPaint(); poll(); },
+    "sc-tobins": () => { SC.step = 6; scPaint(); },
+    "sc-toprices": () => { SC.step = 5; scPaint(); poll(); },
+    "sc-done": () => finishScan(),
+    "sc-discard": () => discardScan(),
+  };
+  // Next ▸ Needs a look: every scan not finished, newest first.
+  function scanTitle(s) { const p = s.proposal; return (p && p.name) || (s.kind === "box" ? lotName(s.lot_id) : "A piece"); }
+  function scanSub(s) {
+    if (s.state === "new") return "No photo yet";
+    if (s.state === "identifying") return "Identifying…";
+    if (s.state === "failed") return "Couldn't identify it. Type the name or retry";
+    if (s.state === "proposed") return confident(s.proposal) ? (s.kind === "box" ? "Identified. Break it down" : "Identified. Confirm it") : "Not sure. Check it";
+    if (s.pricing && s.pricing.state === "queued") return "Pricing…";
+    return "Bin the pieces";
+  }
+  const scanNeedsCheck = (s) => s.state === "failed" || (s.state === "proposed" && !confident(s.proposal));
+
   // ── wiring ───────────────────────────────────────────────────────────────────
   const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
@@ -850,6 +1227,7 @@ PAGE = r"""<!doctype html>
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
     packed: (id) => packed(id),
   };
+  Object.assign(ACTS, SCAN_ACTS);
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
     else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
@@ -890,6 +1268,10 @@ PAGE = r"""<!doctype html>
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
       if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
+      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
+      if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
+      if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
+      if (t.dataset.binsel) { SC.bins[t.dataset.binsel] = t.value; if (t.value && t.dataset.sell === "1") SC.lastBin = t.value; return scPaint(); }
     });
     document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } });
     document.addEventListener("keydown", (e) => {
@@ -916,6 +1298,13 @@ PAGE = r"""<!doctype html>
       e.preventDefault(); copySelected();
     });
     if (mq) mq.addEventListener("change", () => { render(); const d = state.drawer; if (d) refresh(); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && scanOpen()) poll(); });
+    document.addEventListener("error", (e) => {
+      const img = e.target;
+      if (!(img && img.matches && img.matches("#scan-flow img.thumb"))) return;
+      const ph = document.createElement("span"); ph.className = img.className + " ph"; ph.textContent = "Photo ready";
+      img.replaceWith(ph);
+    }, true);
   }
 
   // Boot once, on whichever fires first: the kit's protoagent:init handshake (bearer + theme) or a short timer.

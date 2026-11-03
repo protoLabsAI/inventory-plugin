@@ -247,9 +247,11 @@ def test_the_view_is_organised_around_questions_not_tables():
         "data-status",
     ):
         assert gone not in PAGE, gone
-    # Later slices: no control may show up with nothing behind it.
-    for absent in ("capture=", 'data-act="scan"', ">Scan<", "Flash Gitz", "window.print", "/b/"):
+    # No control may show up with nothing behind it; the scan flow (slice 4) now has a backend.
+    for absent in ("Flash Gitz", "window.print", "/b/", "getUserMedia"):
         assert absent not in PAGE, absent
+    for present in ('capture="environment"', 'data-act="scan"', '"/scans"'):
+        assert present in PAGE, present
     for kept in (
         "pl-drawer--",
         'data-act="price"',
@@ -349,3 +351,32 @@ def test_bins_sort_in_number_order_under_node():
         "\nconsole.log(JSON.stringify(sortBins([{id:'B10'},{id:'SHELF'},{id:'B2'},{id:'B01'}]).map((b) => b.id)));\n"
     )
     assert _run_page(probe) == ["B01", "B2", "B10", "SHELF"]
+
+
+def test_the_scan_breakdown_logic_under_node():
+    """The view's scan bookkeeping, run for real: the agent's contents merge once; a piece
+    photographed into the box absorbs the listed row with the same name (no duplicate); a
+    low-confidence piece needs a Check; Needs a look says what to do next."""
+    probe = (
+        "\nstate.threshold = 0.7; state.lots = [{ id: 'L', name: 'Box scanned' }];"
+        " SC.kind = 'box'; SC.data = { id: 'S1', kind: 'box', state: 'proposed', lot_id: 'L', photos: [], item_ids: [],"
+        " proposal: { name: 'Pyre and Flood', confidence: 0.9, contents: [{ name: 'Riverblades', quantity: 1 }, { name: 'Idol', quantity: 1 }] },"
+        " units: [{ id: 'S2', state: 'proposed', photos: [], proposal: { name: 'riverblades', confidence: 0.95, alternatives: [] } },"
+        " { id: 'S3', state: 'proposed', photos: [], proposal: { name: 'Wardens', confidence: 0.2, alternatives: [{ name: 'Sentinels' }] } }] };"
+        " mergeUnits(); mergeUnits();"
+        " const rows = SC.units.map((u) => [u.name, u.state, u.scan_id || '']);"
+        " const subs = [scanSub({ state: 'identifying' }), scanSub({ state: 'failed' }), scanSub({ state: 'proposed', kind: 'box', proposal: { confidence: 0.3 } }),"
+        " scanSub({ state: 'proposed', kind: 'box', proposal: { confidence: 0.9 } }), scanSub({ state: 'confirmed', pricing: { state: 'queued' } }), scanSub({ state: 'confirmed', pricing: null })];"
+        " console.log(JSON.stringify({ rows, subs, check: [scanNeedsCheck({ state: 'failed' }), scanNeedsCheck({ state: 'proposed', proposal: { confidence: 0.9 } })] }));\n"
+    )
+    out = _run_page(probe)
+    assert out["rows"] == [["Idol", "ok", ""], ["riverblades", "ok", "S2"], ["Wardens", "check", "S3"]]
+    assert out["subs"] == [
+        "Identifying…",
+        "Couldn't identify it. Type the name or retry",
+        "Not sure. Check it",
+        "Identified. Break it down",
+        "Pricing…",
+        "Bin the pieces",
+    ]
+    assert out["check"] == [True, False]
