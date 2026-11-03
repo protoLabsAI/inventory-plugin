@@ -24,7 +24,7 @@ IDENTIFY_BOX = """Inventory scan {scan_id} — a box the operator just bought to
 
 1. Call inventory_scan_photos("{scan_id}") to see the photos.
 2. Do NOT use eBay, Amazon or any pricing tool, and do NOT start subagents. At most two web searches, and only to confirm what this exact box contains.
-3. Call inventory_scan_propose once, with: name (the product as printed on the box), system (the game system, e.g. Warhammer 40K, Blood Bowl, Age of Sigmar, Kill Team), category, condition (NIB for a sealed box, else what the photo shows), confidence from 0 to 1 that you have the EXACT product, up to 3 alternatives when unsure, and contents: the units it splits into, each with name, quantity, category and model_count. Use 0 for any model count you cannot see or confirm. Never guess contents you cannot see or confirm; a short list is better than an invented one.
+3. Call inventory_scan_propose once, with: name (the product as printed on the box), system (the game system, e.g. Warhammer 40K, Blood Bowl, Age of Sigmar, Kill Team), category, condition (a short label ONLY: NIB for a sealed box, else NoS, Assembled, Painted or Used as the photo shows; put any doubt in notes, never in the label), confidence from 0 to 1 that you have the EXACT product, up to 3 alternatives when unsure, and contents: the units it splits into, each with name, quantity, category and model_count. Use 0 for any model count you cannot see or confirm. Never guess contents you cannot see or confirm; a short list is better than an invented one.
 4. If you cannot tell what it is, call inventory_scan_fail("{scan_id}", reason) instead.
 
 Do not message the operator; the Inventory view shows the result."""
@@ -33,7 +33,7 @@ IDENTIFY_UNIT = """Inventory scan {scan_id} — one piece the operator photograp
 
 1. Call inventory_scan_photos("{scan_id}") to see the photos.
 2. Do NOT use eBay, Amazon or any pricing tool, and do NOT start subagents. At most two web searches.
-3. Call inventory_scan_propose once, with: name (the unit or kit, as a buyer would search for it), system, category, condition (e.g. NoS for new on sprue, NIB, Assembled, Painted, Used — what the photo shows), confidence from 0 to 1, and up to 3 alternatives when unsure. Leave contents empty.{known}
+3. Call inventory_scan_propose once, with: name (the unit or kit, as a buyer would search for it), system, category, condition (a short label ONLY: NoS for new on sprue, NIB, Assembled, Painted or Used as the photo shows; put any doubt in notes, never in the label), confidence from 0 to 1, and up to 3 alternatives when unsure. Leave contents empty.{known}
 4. If you cannot tell what it is, call inventory_scan_fail("{scan_id}", reason) instead.
 
 Do not message the operator; the Inventory view shows the result."""

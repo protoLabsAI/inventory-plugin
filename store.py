@@ -226,6 +226,24 @@ def _clean(value, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+_CONDITION_CUT = re.compile(r"\s*(?:\(|\u2014|\u2013| - |;|,|:)")
+
+
+def condition_label(value) -> tuple[str, str]:
+    """An agent-proposed condition as a short label plus whatever explanation rode along.
+
+    The model sometimes answers "NIB (assumed, the photo is a stock shot)". The label is what
+    lands on the item, and so in the Copy list, so keep it to the label ("NIB") and hand the
+    rest back for the notes."""
+    text = " ".join(str(value or "").split())
+    m = _CONDITION_CUT.search(text)
+    label, rest = (text[: m.start()], text[m.start() :]) if m else (text, "")
+    rest = rest.strip(" ()\u2014\u2013-;,:")
+    if len(label) > 24:
+        label, rest = "", text
+    return label, rest
+
+
 def as_flag(value) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "keep"}
@@ -1497,18 +1515,22 @@ class InventoryStore:
                             "model_count": max(0, _int_field("model_count", u.get("model_count") or 0)),
                             "category": _clean(u.get("category"), 80),
                             "system": _clean(u.get("system"), 80),
-                            "condition": _clean(u.get("condition"), 40),
+                            "condition": condition_label(u.get("condition"))[0],
                         }
                     )
+            cond_label, cond_note = condition_label(p.get("condition"))
             out = {
                 "name": name,
                 "system": _clean(p.get("system"), 80),
                 "category": _clean(p.get("category"), 80),
-                "condition": _clean(p.get("condition"), 40),
+                "condition": cond_label,
                 "confidence": min(1.0, max(0.0, confidence)),
                 "alternatives": alternatives[:3],
                 "contents": contents,
-                "notes": _clean(p.get("notes"), 500),
+                "notes": _clean(
+                    " ".join(x for x in (f"Condition: {cond_note}." if cond_note else "", p.get("notes") or "") if x),
+                    500,
+                ),
             }
             ts = now_iso()
             con.execute(
