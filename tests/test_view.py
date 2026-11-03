@@ -380,3 +380,40 @@ def test_the_scan_breakdown_logic_under_node():
         "Bin the pieces",
     ]
     assert out["check"] == [True, False]
+
+
+def test_the_listing_draft_section_renders_each_state_safely_under_node():
+    """The drawer's Listing section from real draft payloads: a hostile title stays inert, the
+    title counter, the controls only where they act (no draft without a price, no new draft for
+    kept stock), and the Next sub-line."""
+    probe = (
+        "\nconst it = { id: 'A', name: 'Item', status: 'available', target: 45, price_basis: 'eBay sold comps (5 sold)' };"
+        "\nconst d = { item_id: 'A', state: 'draft', listing_state: 'draft', title: '<img src=x onerror=alert(1)> Big Mek NoS', description: 'NoS\\n<script>x</script>', notes: '', photos: [{ scan_id: 'S1', photo_id: 'p' }] };"
+        "\nconsole.log(JSON.stringify({"
+        " ready: draftBody(it, d), none: draftBody(it, null), noprice: draftBody({ ...it, target: null }, null),"
+        " kept: draftBody({ ...it, status: 'kept' }, null), drafting: draftBody(it, { ...d, state: 'drafting' }),"
+        " failed: draftBody(it, { ...d, state: 'failed', reason: '<b>no photos</b>' }),"
+        " live: draftBody({ ...it, status: 'listed' }, { ...d, state: 'live', listing: { url: 'javascript:alert(1)' } }),"
+        " labels: [draftLabel(null), draftLabel({ listing_state: 'none' }), draftLabel({ listing_state: 'copied' }), draftLabel({ listing_state: 'live' })] }));\n"
+    )
+    out = _run_page(probe)
+    r = out["ready"]
+    assert "<img" not in r and "<script>" not in r and "&lt;img" in r
+    assert (
+        "40 / 80 characters" in r
+        and 'data-act="dlive"' in r
+        and 'data-act="redraft"' in r
+        and 'data-act="dphotos"' in r
+    )
+    assert r.count('data-act="dcopy"') == 3 and 'data-k="price"' in r  # title, price and description
+    assert "Change it with Set price" in r and ".." not in r  # the price isn't edited in the draft
+    assert (
+        'data-act="draft"' in out["none"]
+        and 'data-act="draft"' not in out["noprice"]
+        and "Set a price first" in out["noprice"]
+    )
+    assert out["kept"] == ""
+    assert "Drafting" in out["drafting"] and 'data-act="dcopy"' not in out["drafting"]
+    assert "&lt;b&gt;no photos" in out["failed"] and "Try again" in out["failed"]
+    assert out["live"] == ""  # the live listing row above carries the link
+    assert out["labels"] == ["no draft yet", "no draft yet", "copied, not live yet", "live on eBay"]
