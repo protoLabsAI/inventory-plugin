@@ -88,6 +88,7 @@ emits:
   - { topic: inventory.scan.changed, summary: "a scan was started, photographed, identified, confirmed, priced, binned or discarded ({id, state, action})" }
   - { topic: inventory.sale.packed, summary: "a sold item was picked and packed ({sale_id, item_id})" }
   - { topic: inventory.draft.changed, summary: "a listing draft was requested, written, copied, failed or marked live ({item_id, state, action})" }
+  - { topic: inventory.paste.changed, summary: "a pasted sale was created, read, failed, recorded or discarded ({id, state, action})" }
 subscribes: []
 
 capabilities:

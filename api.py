@@ -617,6 +617,68 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         emit("item.changed", {"id": item_id, "action": "listed"})
         return {"draft": d}
 
+    # ── pasted sales (sales.py starts the agent turn; the operator records) ─────────
+    from .sales import start_parse
+
+    def _paste_changed(p: dict, action: str) -> None:
+        emit("paste.changed", {"id": p["id"], "state": p["state"], "action": action})
+
+    @r.get("/sale-pastes")
+    async def _pastes() -> dict:
+        return {"pastes": store.list_pastes()}
+
+    @r.post("/sale-pastes")
+    async def _paste_new(body: dict) -> dict:
+        body = body or {}
+        try:
+            p = store.create_paste(str(body.get("text") or ""), item_hint=str(body.get("item_id") or ""), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        p = start_parse(store, p)
+        _paste_changed(p, "create")
+        return {"paste": p}
+
+    @r.get("/sale-pastes/{paste_id}")
+    async def _paste(paste_id: str) -> dict:
+        try:
+            return {"paste": store.get_paste(paste_id)}
+        except InventoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @r.post("/sale-pastes/{paste_id}/retry")
+    async def _paste_retry(paste_id: str) -> dict:
+        try:
+            p = store.retry_paste(paste_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        p = start_parse(store, p)
+        _paste_changed(p, "retry")
+        return {"paste": p}
+
+    @r.post("/sale-pastes/{paste_id}/record")
+    async def _paste_record(paste_id: str, body: dict | None = None) -> dict:
+        body = body or {}
+        try:
+            p = store.record_paste(paste_id, body.get("lines"), force=bool(body.get("force")), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        for sale in p.get("sales", []):
+            emit(
+                "sale.recorded",
+                {"item_id": sale["item_id"], "sale_id": sale["id"], "net": sale["net"], "channel": sale["channel"]},
+            )
+        _paste_changed(p, "record")
+        return {"paste": p}
+
+    @r.delete("/sale-pastes/{paste_id}")
+    async def _paste_discard(paste_id: str) -> dict:
+        try:
+            p = store.discard_paste(paste_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        _paste_changed(p, "discard")
+        return {"paste": p}
+
     @r.get("/items/{item_id}/photos.zip")
     async def _draft_photos_zip(item_id: str):
         """The item's photos in listing order, for uploading to eBay (cover first)."""

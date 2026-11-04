@@ -519,6 +519,44 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         emit("draft.changed", {"item_id": d["item_id"], "state": d["state"], "action": "fail"})
         return json.dumps({"ok": True, "item_id": d["item_id"], "state": d["state"]})
 
+    # ── pasted sales: the turn the plugin starts on "Record a sale" (sales.py) ─────
+    @tool
+    def inventory_sale_candidates(query: str, limit: int = 8) -> str:
+        """Find unsold inventory items matching a description of what sold (product name, part number, a few words from an order). Returns the best matches first, each with id, name, condition, system, bin, status, quantity, target price, lot and any live listing. Use it in a pasted-sale turn before inventory_sale_propose."""
+        try:
+            return json.dumps({"ok": True, "items": store.sale_candidates(query, limit=limit)})
+        except InventoryError as exc:
+            return _err(exc)
+
+    @tool
+    def inventory_sale_propose(
+        paste_id: str,
+        lines: list[dict],
+        confidence: float,
+        questions: list[str] | None = None,
+        notes: str = "",
+        total: float | None = None,
+    ) -> str:
+        """Propose the sale(s) in a pasted order for the operator to check and record. lines = one per item: {"item_id", "quantity", "price", "shipping_charged", "fees", "fees_estimated", "shipping_cost", "channel", "sold_on" (YYYY-MM-DD), "buyer_ref", "order_ref", "notes"} — dollars. total = the bundle price when several items sold for one price (the line prices must add up to it). questions = what the operator should check. Nothing is recorded until the operator confirms it in the Inventory view. A refusal says what to fix: fix it and call again."""
+        try:
+            p = store.propose_paste(
+                paste_id, lines, confidence=confidence, questions=questions or [], notes=notes, total=total, actor=ACTOR
+            )
+        except InventoryError as exc:
+            return _err(exc)
+        emit("paste.changed", {"id": p["id"], "state": p["state"], "action": "propose"})
+        return json.dumps({"ok": True, "paste_id": p["id"], "state": p["state"], "lines": len(p["proposal"]["lines"])})
+
+    @tool
+    def inventory_sale_fail(paste_id: str, reason: str) -> str:
+        """Give up reading a pasted order, with a one-line reason the operator will read (e.g. "nothing in inventory matches 'Necron Warriors'")."""
+        try:
+            p = store.fail_paste(paste_id, reason, actor=ACTOR)
+        except InventoryError as exc:
+            return _err(exc)
+        emit("paste.changed", {"id": p["id"], "state": p["state"], "action": "fail"})
+        return json.dumps({"ok": True, "paste_id": p["id"], "state": p["state"]})
+
     return [
         inventory_summary,
         inventory_list,
@@ -543,6 +581,9 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_draft_item,
         inventory_draft_write,
         inventory_draft_fail,
+        inventory_sale_candidates,
+        inventory_sale_propose,
+        inventory_sale_fail,
     ]
 
 
