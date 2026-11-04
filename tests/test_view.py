@@ -78,14 +78,16 @@ def test_the_page_follows_the_four_rules():
     assert not re.search(r"--pl-[\w-]+\s*:", style)  # tokens are consumed, never defined
     assert not re.search(r"\bonmessage\b|addEventListener\(\s*[\"']message", PAGE)  # the kit owns the handshake
     assert not re.search(r"(fetch|import)\(\s*[\"']https?://|(src|href)=[\"']https?://", PAGE)  # nothing hardcoded
-    # the public router serves exactly the page, at exactly the manifest path, plus TWO more
+    # the public router serves exactly the page, at exactly the manifest path, plus THREE more
     # GETs: the bin- and item-label hops, each taking only an id and reading no data
-    # (tests/test_labels.py, tests/test_item_labels.py)
+    # (tests/test_labels.py, tests/test_item_labels.py), and a printed-label sheet by its
+    # short-lived token (tests/test_sheet_links.py)
     router = build_view_router({})
     assert [(r.path, set(r.methods)) for r in router.routes] == [
         (VIEW_PATH, {"GET"}),
         ("/b/{bin_id}", {"GET"}),
         ("/i/{item_id}", {"GET"}),
+        ("/sheet/{token}", {"GET"}),
     ]
     manifest = yaml.safe_load((ROOT / "protoagent.plugin.yaml").read_text())
     assert manifest["views"][0]["path"] == "/plugins/inventory" + VIEW_PATH
@@ -346,13 +348,14 @@ def test_the_page_has_multiselect_and_copy():
 
 
 def test_label_printing_opens_its_tab_before_any_await_and_boots_into_a_scanned_bin():
-    """A new tab must be opened inside the click itself: anything after an await is a popup
-    the browser blocks. The frame has no allow-modals, so printing never happens in the frame."""
+    """On the web a new tab must be opened inside the click itself: anything after an await is a
+    popup the browser blocks. The frame has no allow-modals, so printing never happens in the frame."""
     from inventory_plugin.view import PAGE
 
     body = PAGE.split("async function labelsDialog", 1)[1].split("async function newBinsDialog", 1)[0]
     submit = body.split("onSubmit: async (v) => {", 1)[1]
-    assert submit.lstrip().startswith('const w = window.open("", "_blank");')
+    assert submit.lstrip().startswith("const w = sheetTab();")
+    assert "openSheet(w, r, r.ids.length)" in submit
     assert ".print(" not in PAGE  # printing happens in the sheet's own tab
     assert 'URLSearchParams(location.search || "").get("bin")' in PAGE and "applyStartBin()" in PAGE
 

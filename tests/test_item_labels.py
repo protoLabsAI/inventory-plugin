@@ -235,6 +235,6 @@ def test_the_view_boots_into_a_scanned_item_and_offers_labels_where_they_are_use
     # the sheet's tab opens inside the click itself, before any await (else it's a blocked popup)
     body = PAGE.split("async function itemLabelsDialog", 1)[1].split("async function newBinsDialog", 1)[0]
     submit = body.split("onSubmit: async (v) => {", 1)[1]
-    pre = submit.split('const w = window.open("", "_blank");', 1)[0]
-    assert "await" not in pre
+    pre = submit.split("const w = sheetTab();", 1)[0]
+    assert "await" not in pre and "openSheet(w, r, r.ids.length)" in submit
     assert ".print(" not in PAGE
