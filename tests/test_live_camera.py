@@ -180,3 +180,31 @@ def test_a_finished_batch_empties_the_list_on_screen_and_isnt_read_straight_back
     )
     # the moved piece and the bin it went into are ignored for 15 s, then readable again; any other bin is not held back
     assert got == {"r": [[False, False], [False, False], [True, True]], "other": True}
+
+
+def test_every_third_tick_reads_the_whole_frame_so_an_off_centre_label_still_reads():
+    # Live test 11-04: a close-up whose QR sat left of the framing square never read.
+    from inventory_plugin.labels import item_label_url
+
+    page = _page()
+    parse = page[page.index("  function parseLabel(text) {") : page.index("  function parseTyped(text) {")]
+    hub = "https://hub.example.ts.net/agents/merchantAgent-6604"
+    w, h = 1280, 720
+    frame = _frame(item_label_url(hub, "NH-SH-Harrows"), w, h, "corner")
+    plans = _node(_helpers() + "\nconsole.log(JSON.stringify([0,1,2,3,4,5].map((n) => camPlan(1920, 1080, n))));")
+    assert [p["full"] for p in plans] == [False, False, True, False, False, True]
+    assert (plans[2]["ow"], plans[2]["oh"], plans[2]["sw"]) == (960, 540, 1920)
+    script = (
+        "const jsQR = require(process.argv[1]);\n"
+        + _helpers()
+        + parse
+        + f"\nconst W = {w}, H = {h}; const src = Buffer.from(JSON.parse(require('fs').readFileSync(0, 'utf8')), 'hex');\n"
+        + "console.log(JSON.stringify([0, 2].map((n) => { const c = camPlan(W, H, n);"
+        + " const out = new Uint8ClampedArray(c.ow * c.oh * 4);"
+        + " for (let y = 0; y < c.oh; y++) for (let x = 0; x < c.ow; x++) {"
+        + "  const sx = c.sx + Math.floor(x * c.sw / c.ow), sy = c.sy + Math.floor(y * c.sh / c.oh);"
+        + "  const i = (sy * W + sx) * 4, o = (y * c.ow + x) * 4; out[o] = src[i]; out[o+1] = src[i+1]; out[o+2] = src[i+2]; out[o+3] = 255; }"
+        + " const r = jsQR(out, c.ow, c.oh, { inversionAttempts: 'dontInvert' }); return r ? parseLabel(r.data) : null; })));"
+    )
+    got = _node(script, str(ROOT / "vendor" / "jsqr" / "jsQR.js"), stdin=json.dumps(frame))
+    assert got == [None, {"kind": "item", "id": "NH-SH-Harrows"}]  # the centre crop misses it; the full frame reads it

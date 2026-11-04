@@ -1686,6 +1686,19 @@ PAGE = r"""<!doctype html>
     const s = Math.max(1, Math.floor(Math.min(vw, vh) * frac));
     return { sx: Math.floor((vw - s) / 2), sy: Math.floor((vh - s) / 2), s, out: Math.min(s, max) };
   }
+  // Every CAM_FULL_EVERY-th tick reads the WHOLE frame instead (scaled to at most CAM_FULL_MAX on
+  // the long side), so a label whose QR is off-centre still reads: an item label's QR sits at its
+  // left edge, and people aim at the middle of the label, not at the code.
+  const CAM_FULL_EVERY = 3, CAM_FULL_MAX = 960;
+  function camFull(vw, vh, max = CAM_FULL_MAX) {
+    const k = Math.min(1, max / Math.max(vw, vh, 1));
+    return { sx: 0, sy: 0, sw: vw, sh: vh, ow: Math.max(1, Math.round(vw * k)), oh: Math.max(1, Math.round(vh * k)) };
+  }
+  function camPlan(vw, vh, frame) {
+    if (frame % CAM_FULL_EVERY === CAM_FULL_EVERY - 1) return { ...camFull(vw, vh), full: true };
+    const c = camCrop(vw, vh);
+    return { sx: c.sx, sy: c.sy, sw: c.s, sh: c.s, ow: c.out, oh: c.out, full: false };
+  }
   const camDue = (now, last, fps = CAM_FPS) => now - last >= 1000 / fps;
   // True the first time a code is seen, then false for CAM_DEDUPE_MS (a label held in view).
   function camFresh(seen, code, now, ms = CAM_DEDUPE_MS) {
@@ -1774,10 +1787,10 @@ PAGE = r"""<!doctype html>
     CAM.last = now;
     const v = CAM.video;
     if (!v || v.readyState < 2 || !v.videoWidth || typeof jsQR !== "function") return;
-    const c = camCrop(v.videoWidth, v.videoHeight);
-    if (CAM.canvas.width !== c.out) { CAM.canvas.width = c.out; CAM.canvas.height = c.out; }
-    CAM.g.drawImage(v, c.sx, c.sy, c.s, c.s, 0, 0, c.out, c.out);
-    const r = jsQR(CAM.g.getImageData(0, 0, c.out, c.out).data, c.out, c.out, { inversionAttempts: camInversion(CAM.frames++) });
+    const n = CAM.frames++, c = camPlan(v.videoWidth, v.videoHeight, n);
+    if (CAM.canvas.width !== c.ow || CAM.canvas.height !== c.oh) { CAM.canvas.width = c.ow; CAM.canvas.height = c.oh; }
+    CAM.g.drawImage(v, c.sx, c.sy, c.sw, c.sh, 0, 0, c.ow, c.oh);
+    const r = jsQR(CAM.g.getImageData(0, 0, c.ow, c.oh).data, c.ow, c.oh, { inversionAttempts: c.full ? "dontInvert" : camInversion(n) });
     if (r && r.data) camHit(r.data);
   }
   async function camHit(text) {
