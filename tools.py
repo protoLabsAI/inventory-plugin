@@ -522,7 +522,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
     # ── pasted sales: the turn the plugin starts on "Record a sale" (sales.py) ─────
     @tool
     def inventory_sale_candidates(query: str, limit: int = 8) -> str:
-        """Find unsold inventory items matching a description of what sold (product name, part number, a few words from an order). Returns the best matches first, each with id, name, condition, system, bin, status, quantity, target price, lot and any live listing. Use it in a pasted-sale turn before inventory_sale_propose."""
+        """Find inventory items matching a description of what sold (product name, part number, a few words from an order). Returns the best matches first, each with id, name, condition, system, bin, status, quantity, target price, lot and any live listing. Items already SOLD in the last 180 days are included with status "sold" plus that sale's sold_on, sale_id, channel and price: a paste that repeats one of those is already recorded. Use it in a pasted-sale turn before inventory_sale_propose."""
         try:
             return json.dumps({"ok": True, "items": store.sale_candidates(query, limit=limit)})
         except InventoryError as exc:
@@ -548,10 +548,10 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         return json.dumps({"ok": True, "paste_id": p["id"], "state": p["state"], "lines": len(p["proposal"]["lines"])})
 
     @tool
-    def inventory_sale_fail(paste_id: str, reason: str) -> str:
-        """Give up reading a pasted order, with a one-line reason the operator will read (e.g. "nothing in inventory matches 'Necron Warriors'")."""
+    def inventory_sale_fail(paste_id: str, reason: str, already_recorded: str = "") -> str:
+        """Give up reading a pasted order, with a one-line reason the operator will read (e.g. "nothing in inventory matches 'Necron Warriors'"). already_recorded = the item id when the paste repeats a sale that is already recorded (a "sold" candidate with the same item and a similar price/date); the reason then reads "Already recorded: <item> sold <date> on <channel> for $X"."""
         try:
-            p = store.fail_paste(paste_id, reason, actor=ACTOR)
+            p = store.fail_paste(paste_id, reason, actor=ACTOR, already_recorded=already_recorded)
         except InventoryError as exc:
             return _err(exc)
         emit("paste.changed", {"id": p["id"], "state": p["state"], "action": "fail"})

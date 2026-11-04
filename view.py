@@ -664,7 +664,7 @@ PAGE = r"""<!doctype html>
     let h = "";
     h += '<div class="next-acts"><button class="pl-btn pl-btn--sm" data-act="pastesale">Record a sale</button><span class="muted">Paste an order or a note; the agent fills it in for you to check.</span></div>';
     if (state.toEnd && state.toEnd.length) h += sec("End these listings", state.toEnd.length, toEndRows(state.toEnd), "");
-    if (state.pastes.length) h += sec("Sales to check", state.pastes.length, state.pastes.slice(0, ROW_CAP).map((p) => '<li><button class="irow" data-act="openpaste" data-id="' + esc(p.id) + '"><span class="irow-main"><span class="irow-name">' + esc(pasteTitle(p)) + '</span><span class="irow-sub">' + esc(pasteSub(p)) + "</span></span>" + (p.state === "proposed" ? '<span class="pl-badge pl-badge--info">ready</span>' : p.state === "failed" ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join(""), "");
+    if (state.pastes.length) h += sec("Sales to check", state.pastes.length, state.pastes.slice(0, ROW_CAP).map((p) => '<li><button class="irow" data-act="openpaste" data-id="' + esc(p.id) + '"><span class="irow-main"><span class="irow-name">' + esc(pasteTitle(p)) + '</span><span class="irow-sub">' + esc(pasteSub(p)) + "</span></span>" + (p.state === "proposed" ? '<span class="pl-badge pl-badge--info">ready</span>' : p.state === "failed" && p.proposal && p.proposal.already_recorded ? '<span class="pl-badge">recorded</span>' : p.state === "failed" ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join(""), "");
     if (state.toPack.length) {
       const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
         sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
@@ -1092,6 +1092,11 @@ PAGE = r"""<!doctype html>
       paintDrawer("Record a sale", '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span><span class="pl-skel skel-line w40"></span></div><p class="muted" role="status">Reading the order… usually under a minute. You can close this; it waits on Next.</p>' + said, '<div class="foot sc-foot"><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard</button></div>');
       PS.timer = setTimeout(() => { if (seq === drawerSeq && !document.hidden) pastePaint(); else if (seq === drawerSeq) PS.timer = setTimeout(pastePaint, POLL_MS); }, POLL_MS);
       return;
+    }
+    const dup = p.state === "failed" && p.proposal && p.proposal.already_recorded;
+    if (dup) {  // the paste repeats a sale already recorded: say so, link the item, no retry
+      return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--info" role="status"><div class="pl-callout__body">' + esc(p.reason || "Already recorded.") + "</div></div>" + said,
+        '<div class="foot sc-foot"><button class="pl-btn pl-btn--primary block" data-item="' + esc(dup.item_id) + '">Open ' + esc(dup.name || dup.item_id) + '</button><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard this paste</button></div>');
     }
     if (p.state === "failed") {
       return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body">' + esc(p.reason || "Couldn't read that order.") + "</div></div>" + said,
