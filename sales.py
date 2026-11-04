@@ -17,6 +17,7 @@ The operator pasted the text below about something that SOLD. Today is {today}.{
 Rules:
 - Do NOT browse the web, search eBay or start subagents. The only other tool you may use is ebay_net_proceeds (arithmetic, no browsing) to estimate eBay fees, and only when the paste doesn't state them.
 - Find each item with inventory_sale_candidates(query) — search by the words in the paste (product name, part number). Several searches are fine. Only unsold inventory can be sold.
+  - Candidates with status "sold" are sales ALREADY RECORDED (with their sold_on, channel and price). If the paste is that same sale (same item, a similar price and date), it is a repeat: call inventory_sale_fail("{paste_id}", "Already recorded: <item name> sold <sold_on> on <channel> for $<price>", already_recorded=<item_id>). Never propose a second sale of it, and never say it isn't in inventory.
   - Item names often use the team, faction or product name rather than the paste's word ("human dice" is the Reikland Reavers dice set): search by the product type too ("dice"), choose from what you know, and add a question when two candidates could fit.
 - Then call inventory_sale_propose("{paste_id}", lines, confidence, questions, notes, total) ONCE. One line per item that sold:
   {{"item_id", "quantity", "price", "shipping_charged", "fees", "fees_estimated", "shipping_cost", "channel", "sold_on", "buyer_ref", "order_ref", "notes"}}

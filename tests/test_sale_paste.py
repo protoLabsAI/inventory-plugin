@@ -53,13 +53,53 @@ class FakeSdk:
 
 
 # ── candidates ────────────────────────────────────────────────────────────────
-def test_candidates_find_by_words_part_number_and_skip_sold(store):
+def test_candidates_find_by_words_part_number_and_flag_recent_sales(store):
     _stock(store)
     names = [c["item_id"] for c in store.sale_candidates("both dungeon bowl dice")]
     assert names[:2] == ["DICE-D1", "DICE-D2"] or set(names[:2]) == {"DICE-D1", "DICE-D2"}
     assert store.sale_candidates("Orks Big Mek Shokk Attack Gun 99120103031")[0]["item_id"] == "MEK"
-    assert "GONE" not in [c["item_id"] for c in store.sale_candidates("ork lootas")]
+    # 0.13.0: a recently SOLD item comes back flagged with its sale, so a repeat paste reads as
+    # "already recorded" instead of "not in inventory" (two real pastes did that)
+    (gone,) = [c for c in store.sale_candidates("ork lootas") if c["item_id"] == "GONE"]
+    assert gone["status"] == "sold" and gone["channel"] == "eBay" and gone["price"] == 40.0
+    assert gone["sold_on"] == _today() and gone["sale_id"] and gone["live_listing"] is None
     assert store.sale_candidates("zzzz qqqq") == []
+
+
+def test_a_sale_older_than_the_lookback_is_not_a_candidate(store):
+    from inventory_plugin.store import SOLD_LOOKBACK_DAYS
+
+    _stock(store)
+    old = (datetime.now(UTC) - timedelta(days=SOLD_LOOKBACK_DAYS + 5)).strftime("%Y-%m-%d")
+    with store._tx() as con:
+        con.execute("UPDATE sales SET sold_on=? WHERE item_id='GONE'", (old,))
+    assert "GONE" not in [c["item_id"] for c in store.sale_candidates("ork lootas")]
+
+
+def test_a_repeat_paste_fails_as_already_recorded_and_links_the_item(store):
+    _stock(store)
+    p = store.create_paste("sold the lootas for $40 on ebay", actor="op")
+    with pytest.raises(InventoryError, match="already sold; if the paste repeats a recorded sale"):
+        store.propose_paste(p["id"], [_line("GONE", 40)], confidence=0.9, actor="agent")
+    with pytest.raises(InventoryError, match="isn't sold"):
+        store.fail_paste(p["id"], "Already recorded", actor="agent", already_recorded="MEK")
+    with pytest.raises(InventoryError, match="no item"):
+        store.fail_paste(p["id"], "Already recorded", actor="agent", already_recorded="NOPE")
+    f = store.fail_paste(
+        p["id"], f"Already recorded: Ork Lootas sold {_today()} on eBay for $40", actor="agent", already_recorded="GONE"
+    )
+    assert f["state"] == "failed" and f["reason"].startswith("Already recorded: Ork Lootas")
+    assert f["proposal"] == {"already_recorded": {"item_id": "GONE", "name": "Ork Lootas"}}
+    assert len(store.list_sales()) == 1  # nothing recorded twice
+
+
+def test_the_parse_prompt_teaches_the_repeat_rule():
+    prompt = sales.parse_prompt({"id": "P1", "text": "x", "item_hint": ""}, today="2026-11-04")
+    assert (
+        'status "sold"' in prompt
+        and "already_recorded=<item_id>" in prompt
+        and "never say it isn't in inventory" in prompt
+    )
 
 
 def test_candidates_put_the_opened_item_first(store):
@@ -300,3 +340,12 @@ def test_tools_and_api_round_trip(registry):
     assert c.get(api + "/sale-pastes/PNOPE").status_code == 404
     gone = json.loads(tools["inventory_sale_fail"].invoke({"paste_id": p["id"], "reason": "x"}))
     assert gone["ok"] is False
+
+
+def test_the_view_shows_a_repeat_paste_as_recorded_with_the_item_linked():
+    from inventory_plugin.view import PAGE
+
+    assert "p.proposal.already_recorded" in PAGE
+    block = PAGE[PAGE.index("const dup = p.state") : PAGE.index('if (p.state === "failed") {')]
+    assert "pl-callout--info" in block and 'data-item="' in block and "paste-discard" in block
+    assert "paste-retry" not in block  # a repeat is not a failure to retry

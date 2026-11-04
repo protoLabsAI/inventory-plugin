@@ -253,6 +253,8 @@ PASTE_STATES = ("parsing", "proposed", "recorded", "failed", "discarded")
 MAX_PASTE_CHARS = 8000
 MAX_PASTE_LINES = 20
 #: A parse still running after this long shows as failed (Try again).
+# A pasted sale is checked against sales recorded this far back, so a repeat paste is caught.
+SOLD_LOOKBACK_DAYS = 180
 PASTE_TIMEOUT_MINUTES = 10
 _PASTE_ID_RE = re.compile(r"^P[0-9A-F]{10}$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -2356,31 +2358,56 @@ class InventoryStore:
             self._audit(con, "paste", row["id"], "discard", actor)
             return self._paste_dict(self._paste_row(con, row["id"]))
 
-    def fail_paste(self, paste_id: str, reason: str, *, actor: str = "agent") -> dict:
+    def fail_paste(self, paste_id: str, reason: str, *, actor: str = "agent", already_recorded: str = "") -> dict:
+        """Give up on a paste with a reason. ``already_recorded`` = the id of an item whose sale
+        this paste repeats: the view then says so and links the item instead of offering a retry."""
         why = _clean(reason, 300) or "Couldn't read that order."
         with self._tx() as con:
             row = self._paste_row(con, paste_id)
             if row["state"] not in ("parsing", "failed"):
                 raise InventoryError(f"that paste isn't waiting to be read (it is {row['state']})")
+            already = None
+            if already_recorded:
+                it = con.execute("SELECT id, name, status FROM items WHERE id=?", (str(already_recorded),)).fetchone()
+                if it is None:
+                    raise InventoryError(f"no item {already_recorded!r}; leave already_recorded empty")
+                if it["status"] != "sold":
+                    raise InventoryError(f"{it['name']} isn't sold, so this can't repeat a recorded sale")
+                already = {"already_recorded": {"item_id": it["id"], "name": it["name"]}}
             ts = now_iso()
             con.execute(
-                "UPDATE sale_pastes SET state='failed', reason=?, finished_at=?, updated_at=? WHERE id=?",
-                (why, ts, ts, row["id"]),
+                "UPDATE sale_pastes SET state='failed', reason=?, proposal=?, finished_at=?, updated_at=? WHERE id=?",
+                (why, json.dumps(already) if already else row["proposal"], ts, ts, row["id"]),
             )
-            self._audit(con, "paste", row["id"], "fail", actor, {"reason": why})
+            self._audit(
+                con,
+                "paste",
+                row["id"],
+                "fail",
+                actor,
+                {"reason": why, **({"already_recorded": already_recorded} if already else {})},
+            )
             return self._paste_dict(self._paste_row(con, row["id"]))
 
     def sale_candidates(self, query: str, *, limit: int = 8, include: str = "") -> list[dict]:
-        """Unsold items that best match a free-text description of what sold ("human dice",
+        """Items that best match a free-text description of what sold ("human dice",
         "Big Mek Shokk Attack Gun 99120103031"), best first. Scores words shared with the name,
         id, category, system and notes, plus a fuzzy match on the name. ``include`` (an item id)
-        is always returned first when it exists — the item the operator opened."""
+        is always returned first when it exists — the item the operator opened.
+
+        Unsold items, plus items SOLD in the last ``SOLD_LOOKBACK_DAYS`` days flagged with that
+        sale (``status: "sold"``, ``sold_on``, ``sale_id``, ``channel``, ``price``), so a paste of
+        a sale that is already recorded reads as "already recorded", never as "not in
+        inventory" (0.13.0; two real pastes did exactly that)."""
         import difflib
 
         words = [w for w in re.findall(r"[a-z0-9]+", str(query or "").lower()) if len(w) > 1]
+        since = (datetime.now(UTC) - timedelta(days=SOLD_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         with self._read() as con:
             rows = con.execute(
                 "SELECT * FROM items WHERE status IN ('planned','available','listed','pending')"
+                " OR (status='sold' AND id IN (SELECT item_id FROM sales WHERE sold_on >= ?))",
+                (since,),
             ).fetchall()
             scored = []
             q = " ".join(words)
@@ -2402,22 +2429,34 @@ class InventoryStore:
                 lot = (
                     con.execute("SELECT name FROM lots WHERE id=?", (r["lot_id"],)).fetchone() if r["lot_id"] else None
                 )
-                out.append(
-                    {
-                        "item_id": r["id"],
-                        "name": r["name"],
-                        "condition": r["condition"],
-                        "system": r["system"],
-                        "category": r["category"],
-                        "bin_id": r["bin_id"],
-                        "status": r["status"],
-                        "quantity": r["quantity"],
-                        "target": dollars(r["target_cents"]),
-                        "lot": lot["name"] if lot else "",
-                        "live_listing": {"channel": live["channel"], "url": live["url"]} if live else None,
-                        "score": round(score, 3),
-                    }
-                )
+                entry = {
+                    "item_id": r["id"],
+                    "name": r["name"],
+                    "condition": r["condition"],
+                    "system": r["system"],
+                    "category": r["category"],
+                    "bin_id": r["bin_id"],
+                    "status": r["status"],
+                    "quantity": r["quantity"],
+                    "target": dollars(r["target_cents"]),
+                    "lot": lot["name"] if lot else "",
+                    "live_listing": {"channel": live["channel"], "url": live["url"]} if live else None,
+                    "score": round(score, 3),
+                }
+                if r["status"] == "sold":
+                    last = con.execute(
+                        "SELECT id, sold_on, channel, price_cents FROM sales WHERE item_id=?"
+                        " ORDER BY sold_on DESC, id DESC LIMIT 1",
+                        (r["id"],),
+                    ).fetchone()
+                    entry.update(
+                        sale_id=last["id"] if last else None,
+                        sold_on=last["sold_on"] if last else "",
+                        channel=last["channel"] if last else "",
+                        price=dollars(last["price_cents"]) if last else None,
+                        live_listing=None,
+                    )
+                out.append(entry)
         return out
 
     @staticmethod
@@ -2432,7 +2471,12 @@ class InventoryStore:
                 f"line {n}: no item {iid!r}; use inventory_sale_candidates to find it, or ask in questions"
             )
         if item["status"] in CLOSED and not force:
-            raise InventoryError(f"line {n}: {item['name']} ({iid}) is already {item['status']}")
+            hint = (
+                "; if the paste repeats a recorded sale, call inventory_sale_fail with already_recorded"
+                if item["status"] == "sold"
+                else ""
+            )
+            raise InventoryError(f"line {n}: {item['name']} ({iid}) is already {item['status']}{hint}")
         qty = _int_field("quantity", raw.get("quantity") if raw.get("quantity") not in (None, "") else 1)
         if qty < 1 or qty > max(int(item["quantity"] or 1), 1):
             raise InventoryError(f"line {n}: quantity {qty} but the item holds {item['quantity'] or 1}")

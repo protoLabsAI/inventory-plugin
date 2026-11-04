@@ -117,6 +117,13 @@ PAGE = r"""<!doctype html>
   .frow{display:flex;gap:var(--pl-space-2);width:100%}
   .frow > *{flex:1 1 0}
   .scanbar{display:none}
+  .cam{position:relative;width:100%;aspect-ratio:1/1;max-height:60vh;overflow:hidden;border-radius:var(--pl-radius);background:var(--pl-color-bg-inset)}
+  .cam video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .cam-frame{position:absolute;inset:15%;border:calc(var(--pl-border-width) * 2) solid var(--pl-color-fg);border-radius:var(--pl-radius);opacity:.85;transition:border-color .15s}
+  .cam.hit .cam-frame{border-color:var(--pl-color-status-success);border-width:calc(var(--pl-border-width) * 4)}
+  .cam-hint{position:absolute;left:0;right:0;bottom:var(--pl-space-2);text-align:center;font-size:var(--pl-font-size-sm);color:var(--pl-color-fg)}
+  .cam-acts{justify-content:space-between;align-items:center}
+  @media (prefers-reduced-motion:reduce){.cam-frame{transition:none}}
   @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}.view .scan-top{display:none}.binsel{min-height:var(--pl-space-12)}.scanbar{display:block;padding:var(--pl-space-2) var(--pl-space-4) calc(var(--pl-space-2) + env(safe-area-inset-bottom));border-top:var(--pl-border-width) solid var(--pl-color-border);background:var(--pl-color-bg)}}
   @media (max-width:999px){.col-lot{display:none}}
   @media (max-width:639px){.pline .form{grid-template-columns:1fr 1fr}}
@@ -348,6 +355,7 @@ PAGE = r"""<!doctype html>
       if (SC.id && !(SC.data && SC.data.finished_at)) { toast("Saved. Pick it up from Next, under Needs a look"); setTimeout(refresh, 0); }
     }
     if (state.drawer && state.drawer.kind === "paste") pasteStopPoll();
+    if (CAM.on || CAM.idled) { camStop(); CAM.idled = false; CAM.error = ""; }
     state.drawer = null; $("#overlay-root").innerHTML = "";
     const again = lastFocus && lastFocus.dataset && lastFocus.dataset.item ? document.querySelector('[data-item="' + CSS.escape(lastFocus.dataset.item) + '"]') : lastFocus;
     if (again && again.isConnected) again.focus();
@@ -664,7 +672,7 @@ PAGE = r"""<!doctype html>
     let h = "";
     h += '<div class="next-acts"><button class="pl-btn pl-btn--sm" data-act="pastesale">Record a sale</button><span class="muted">Paste an order or a note; the agent fills it in for you to check.</span></div>';
     if (state.toEnd && state.toEnd.length) h += sec("End these listings", state.toEnd.length, toEndRows(state.toEnd), "");
-    if (state.pastes.length) h += sec("Sales to check", state.pastes.length, state.pastes.slice(0, ROW_CAP).map((p) => '<li><button class="irow" data-act="openpaste" data-id="' + esc(p.id) + '"><span class="irow-main"><span class="irow-name">' + esc(pasteTitle(p)) + '</span><span class="irow-sub">' + esc(pasteSub(p)) + "</span></span>" + (p.state === "proposed" ? '<span class="pl-badge pl-badge--info">ready</span>' : p.state === "failed" ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join(""), "");
+    if (state.pastes.length) h += sec("Sales to check", state.pastes.length, state.pastes.slice(0, ROW_CAP).map((p) => '<li><button class="irow" data-act="openpaste" data-id="' + esc(p.id) + '"><span class="irow-main"><span class="irow-name">' + esc(pasteTitle(p)) + '</span><span class="irow-sub">' + esc(pasteSub(p)) + "</span></span>" + (p.state === "proposed" ? '<span class="pl-badge pl-badge--info">ready</span>' : p.state === "failed" && p.proposal && p.proposal.already_recorded ? '<span class="pl-badge">recorded</span>' : p.state === "failed" ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join(""), "");
     if (state.toPack.length) {
       const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
         sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
@@ -1092,6 +1100,11 @@ PAGE = r"""<!doctype html>
       paintDrawer("Record a sale", '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span><span class="pl-skel skel-line w40"></span></div><p class="muted" role="status">Reading the order… usually under a minute. You can close this; it waits on Next.</p>' + said, '<div class="foot sc-foot"><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard</button></div>');
       PS.timer = setTimeout(() => { if (seq === drawerSeq && !document.hidden) pastePaint(); else if (seq === drawerSeq) PS.timer = setTimeout(pastePaint, POLL_MS); }, POLL_MS);
       return;
+    }
+    const dup = p.state === "failed" && p.proposal && p.proposal.already_recorded;
+    if (dup) {  // the paste repeats a sale already recorded: say so, link the item, no retry
+      return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--info" role="status"><div class="pl-callout__body">' + esc(p.reason || "Already recorded.") + "</div></div>" + said,
+        '<div class="foot sc-foot"><button class="pl-btn pl-btn--primary block" data-item="' + esc(dup.item_id) + '">Open ' + esc(dup.name || dup.item_id) + '</button><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard this paste</button></div>');
     }
     if (p.state === "failed") {
       return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body">' + esc(p.reason || "Couldn't read that order.") + "</div></div>" + said,
@@ -1603,6 +1616,147 @@ PAGE = r"""<!doctype html>
     for (const max of [1600, 0, 1000]) { const t = readQr(img, max); if (t) return t; }
     return "";
   }
+  // ── live camera (0.13.0) ─────────────────────────────────────────────────────────────
+  // Through the hub the console and this frame are the SAME origin, so getUserMedia works in the
+  // frame although the host's iframe allow= lists only clipboard + fullscreen (camera's default
+  // allowlist is 'self'). Cross-origin (the desktop app: tauri:// parent, 127.0.0.1 frame, and no
+  // camera permission in that app) it fails, and the photo path below stays the fallback.
+  // Pure helpers first (unit-tested under node), then the stream.
+  const CAM_FPS = 7, CAM_DEDUPE_MS = 2500, CAM_IDLE_MS = 120000, CAM_CANVAS_MAX = 720, CAM_CROP = 0.7;
+  // The centre square, CAM_CROP of the short side — exactly the framing square drawn over the
+  // video — scaled down to at most CAM_CANVAS_MAX px for jsQR.
+  function camCrop(vw, vh, frac = CAM_CROP, max = CAM_CANVAS_MAX) {
+    const s = Math.max(1, Math.floor(Math.min(vw, vh) * frac));
+    return { sx: Math.floor((vw - s) / 2), sy: Math.floor((vh - s) / 2), s, out: Math.min(s, max) };
+  }
+  const camDue = (now, last, fps = CAM_FPS) => now - last >= 1000 / fps;
+  // True the first time a code is seen, then false for CAM_DEDUPE_MS (a label held in view).
+  function camFresh(seen, code, now, ms = CAM_DEDUPE_MS) {
+    const t = seen.get(code);
+    if (t !== undefined && now - t < ms) return false;
+    seen.set(code, now);
+    return true;
+  }
+  // jsQR's inversion search is the slow part: plain dark-on-light every frame, both every 4th.
+  const camInversion = (frame) => (frame % 4 === 0 ? "attemptBoth" : "dontInvert");
+  function camSupported() {
+    try {
+      if (!(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function")) return false;
+      const fp = document.featurePolicy;  // Safari has none: then just try
+      return !(fp && typeof fp.allowsFeature === "function" && fp.allowsFeature("camera") === false);
+    } catch (_) { return false; }
+  }
+  const CAM = { on: false, stream: null, track: null, el: null, video: null, canvas: null, g: null, raf: 0, last: 0, frames: 0, seen: new Map(), lastHit: 0, idle: 0, paused: false, idled: false, audio: null, torch: false, torchOn: false, error: "", unavailable: false };
+  function camBeep() {
+    const a = CAM.audio; if (!a) return;
+    try {
+      const o = a.createOscillator(), gn = a.createGain();
+      o.frequency.value = 1046; gn.gain.value = 0.06; o.connect(gn); gn.connect(a.destination);
+      o.start(); o.stop(a.currentTime + 0.08);
+    } catch (_) { /* no sound is fine */ }
+  }
+  function camFlash() { if (!CAM.el) return; CAM.el.classList.add("hit"); setTimeout(() => CAM.el && CAM.el.classList.remove("hit"), 450); }
+  function camBuild() {
+    const el = document.createElement("div"); el.className = "cam";
+    const v = document.createElement("video");
+    v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("autoplay", ""); v.muted = true; v.playsInline = true;
+    el.appendChild(v);
+    const frame = document.createElement("div"); frame.className = "cam-frame"; el.appendChild(frame);
+    const hint = document.createElement("div"); hint.className = "cam-hint"; hint.textContent = "Point at a label"; el.appendChild(hint);
+    CAM.el = el; CAM.video = v;
+    CAM.canvas = document.createElement("canvas"); CAM.g = CAM.canvas.getContext("2d", { willReadFrequently: true });
+  }
+  // paPaint rebuilds the drawer's HTML: move the live <video> into the new slot instead of
+  // recreating it, so the stream keeps playing.
+  function camMount() {
+    const slot = $("#pa-cam-slot");
+    if (!slot || !CAM.el) return;
+    slot.appendChild(CAM.el);
+    if (CAM.video && CAM.video.paused && CAM.on) CAM.video.play().catch(() => {});
+  }
+  async function camStart() {
+    if (CAM.on) return;
+    CAM.error = ""; CAM.idled = false;
+    try {  // the AudioContext must be made inside this tap, or iOS keeps it muted
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && !CAM.audio) CAM.audio = new AC();
+      if (CAM.audio && CAM.audio.state === "suspended") CAM.audio.resume().catch(() => {});
+    } catch (_) { /* silent scanning still works */ }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    } catch (e) {
+      const name = (e && e.name) || "";
+      if (name === "NotAllowedError") CAM.error = "Camera permission was refused. Allow it in Settings ▸ Safari ▸ Camera, or take a photo instead.";
+      else { CAM.unavailable = true; CAM.error = "The live camera isn't available here, so take a photo of the label instead."; }
+      return paPaint();
+    }
+    if (!state.drawer || state.drawer.kind !== "putaway") { stream.getTracks().forEach((t) => t.stop()); return; }
+    if (!CAM.el) camBuild();
+    CAM.stream = stream; CAM.track = stream.getVideoTracks()[0] || null;
+    try { CAM.torch = !!(CAM.track && CAM.track.getCapabilities && CAM.track.getCapabilities().torch); } catch (_) { CAM.torch = false; }
+    CAM.torchOn = false; CAM.video.srcObject = stream; CAM.on = true; CAM.paused = false; CAM.seen.clear(); CAM.frames = 0; CAM.last = 0;
+    CAM.lastHit = Date.now();
+    paPaint();
+    CAM.video.play().catch(() => {});
+    CAM.raf = requestAnimationFrame(camTick);
+    clearInterval(CAM.idle);
+    CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; paPaint(); } }, 5000);
+    paSay("Camera on. Point it at a label.");
+  }
+  function camStop() {
+    cancelAnimationFrame(CAM.raf); CAM.raf = 0; clearInterval(CAM.idle); CAM.idle = 0;
+    if (CAM.stream) CAM.stream.getTracks().forEach((t) => t.stop());
+    if (CAM.video) CAM.video.srcObject = null;
+    CAM.stream = null; CAM.track = null; CAM.on = false; CAM.paused = false; CAM.torchOn = false;
+  }
+  function camTick(now) {
+    if (!CAM.on) return;
+    CAM.raf = requestAnimationFrame(camTick);
+    if (CAM.paused || document.hidden || !camDue(now, CAM.last)) return;
+    CAM.last = now;
+    const v = CAM.video;
+    if (!v || v.readyState < 2 || !v.videoWidth || typeof jsQR !== "function") return;
+    const c = camCrop(v.videoWidth, v.videoHeight);
+    if (CAM.canvas.width !== c.out) { CAM.canvas.width = c.out; CAM.canvas.height = c.out; }
+    CAM.g.drawImage(v, c.sx, c.sy, c.s, c.s, 0, 0, c.out, c.out);
+    const r = jsQR(CAM.g.getImageData(0, 0, c.out, c.out).data, c.out, c.out, { inversionAttempts: camInversion(CAM.frames++) });
+    if (r && r.data) camHit(r.data);
+  }
+  async function camHit(text) {
+    const now = Date.now();
+    if (!camFresh(CAM.seen, text, now)) return;
+    CAM.lastHit = now;
+    const lab = parseLabel(text);
+    if (!lab) { PA.note = "That QR code isn't an Inventory label."; return paPaint(); }
+    if (lab.kind === "item") {
+      const had = PA.ids.includes(lab.id);
+      await paApply(lab);
+      if (PA.ids.includes(lab.id) && !had) { camBeep(); camFlash(); }
+      else if (had) paSay(clean((itemById(lab.id) || {}).name || lab.id) + " is already in the list");
+      return;
+    }
+    // A bin: stop reading while its confirm is open; resume (or leave, for an empty tray) after.
+    CAM.paused = true;
+    camBeep(); camFlash();
+    try { await paApply(lab); } finally { CAM.paused = false; CAM.lastHit = Date.now(); }
+  }
+  // Pieces just put away, and their bin's label, are usually still in view: don't add the pieces
+  // straight back, and don't read the bin again (an empty list + a bin label would open the bin
+  // and end the session).
+  const CAM_MOVED_MS = 15000;
+  function camMoved(ids, bin) {
+    const until = Date.now() + CAM_MOVED_MS - CAM_DEDUPE_MS;
+    for (const [code] of CAM.seen) {
+      const lab = parseLabel(code);
+      if (lab && ((lab.kind === "item" && ids.includes(lab.id)) || (lab.kind === "bin" && lab.id === bin))) CAM.seen.set(code, until);
+    }
+  }
+  async function camTorch() {
+    if (!CAM.track || !CAM.torch) return;
+    try { await CAM.track.applyConstraints({ advanced: [{ torch: !CAM.torchOn }] }); CAM.torchOn = !CAM.torchOn; } catch (_) { CAM.torch = false; }
+    paPaint();
+  }
   function openPutAway() { ++drawerSeq; state.drawer = { kind: "putaway" }; PA.note = ""; paPaint(); }
   function paPaint() {
     if (!state.drawer || state.drawer.kind !== "putaway") return;
@@ -1613,14 +1767,24 @@ PAGE = r"""<!doctype html>
         '</span></div><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
     }).join("");
     const n = PA.ids.length;
+    const live = camSupported() && !CAM.unavailable;
+    const camUi = CAM.on
+      ? '<div id="pa-cam-slot" class="gap-t"></div><div class="drow cam-acts"><span class="muted" aria-hidden="true">' + (n ? n + " to put away" : "Nothing yet") + "</span>" +
+        (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
+        '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
+      : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
     const body = '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>" +
+      camUi + (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
       (PA.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
       (PA.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(PA.note) + "</div></div>" : "") +
       (n ? '<div class="pl-eyebrow gap-t">To put away · ' + n + '</div><ul class="list">' + rows + "</ul>" : "") +
       '<div class="form one gap-t">' + field("pa_id", "Or type an item or bin id", "", { placeholder: "B03 or an item id", hint: "For a label that won't read." }) + '</div><div class="drow"><button class="pl-btn" data-act="pa-type">Add</button></div>' +
       '<div class="sr-only" id="pa-live" aria-live="polite"></div>';
-    const foot = capBtn("pa", n ? "Scan the bin's label" : "Scan a label") + (n ? '<button class="pl-btn block" data-act="pa-clear">Clear the list</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
+    const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
+    const photo = capBtn("pa", live ? (n ? "Take a photo of the bin's label" : "Take a photo of a label") : (n ? "Scan the bin's label" : "Scan a label"), !live);
+    const foot = camBtn + photo + (n ? '<button class="pl-btn block" data-act="pa-clear">Clear the list</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
     paintDrawer("Put away", '<div id="putaway">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+    if (CAM.on) camMount();
   }
   const paSay = (t) => { const l = $("#pa-live"); if (l) l.textContent = t; };
   async function paScan(file) {
@@ -1658,8 +1822,10 @@ PAGE = r"""<!doctype html>
       onSubmit: async () => {
         const r = await api("/bins/move", "POST", { item_ids: ids, bin_id: bin, put_away: true });
         PA.ids = PA.ids.filter((id) => !ids.includes(id)); saveTray(); PA.note = "";
+        camMoved(ids, bin);
         toast(ids.length + " item" + (ids.length === 1 ? "" : "s") + " → " + bin + (r.now_available.length ? " · " + r.now_available.length + " now for sale" : ""), "success");
         await refresh();
+        paPaint();  // the drawer stays open for the next batch: show the emptied list
       },
     });
   }
@@ -1669,6 +1835,9 @@ PAGE = r"""<!doctype html>
     "pa-remove": (id) => { PA.ids = PA.ids.filter((x) => x !== id); saveTray(); paPaint(); },
     "pa-clear": () => { PA.ids = []; saveTray(); PA.note = ""; paPaint(); },
     "pa-type": () => { const el = $("#f_pa_id"); const lab = parseTyped(el ? el.value : ""); if (!lab) return toast("Type an item id or a bin id", "warning"); return paApply(lab); },
+    "pa-cam": () => camStart(),
+    "pa-camstop": () => { camStop(); CAM.idled = false; paPaint(); },
+    "pa-torch": () => camTorch(),
   };
 
   // ── wiring ───────────────────────────────────────────────────────────────────
@@ -1769,6 +1938,9 @@ PAGE = r"""<!doctype html>
     });
     if (mq) mq.addEventListener("change", () => { render(); const d = state.drawer; if (d) refresh(); });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && scanOpen()) poll(); });
+    // A hidden view never holds the camera: stop it, and offer Resume when it comes back.
+    document.addEventListener("visibilitychange", () => { if (document.hidden && CAM.on) { camStop(); CAM.idled = true; paPaint(); } });
+    window.addEventListener("pagehide", () => { if (CAM.on) camStop(); });
     document.addEventListener("error", (e) => {
       const img = e.target;
       if (!(img && img.matches && img.matches("#scan-flow img.thumb"))) return;

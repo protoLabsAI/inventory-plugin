@@ -255,7 +255,8 @@ def test_the_view_is_organised_around_questions_not_tables():
     ):
         assert gone not in PAGE, gone
     # No control may show up with nothing behind it; the scan flow (slice 4) now has a backend.
-    for absent in ("Flash Gitz", "window.print", "/b/", "getUserMedia"):
+    # getUserMedia is allowed since 0.13.0: the live viewfinder (tests/test_live_camera.py)
+    for absent in ("Flash Gitz", "window.print", "/b/"):
         assert absent not in PAGE, absent
     for present in ('capture="environment"', 'data-act="scan"', '"/scans"'):
         assert present in PAGE, present
