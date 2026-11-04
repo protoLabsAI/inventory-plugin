@@ -115,8 +115,8 @@ def test_the_scan_flow_ends_by_labelling_not_binning():
 
     assert "data-binsel" not in PAGE and "Put each piece in a bin" not in PAGE
     assert 'btnP("sc-tolabels", "Label them")' in PAGE and '"sc-done-labels"' in PAGE and '"Skip labels"' in PAGE
-    assert 'capture="environment"' in PAGE and "data-cap=\"' + what" in PAGE  # native capture, no getUserMedia
-    assert "getUserMedia" not in PAGE
+    # native capture stays the path that always works; 0.13.0 adds a live viewfinder on top of it
+    assert 'capture="environment"' in PAGE and "data-cap=\"' + what" in PAGE
 
 
 def _qr_rgba(text: str, scale: int = 6, border: int = 4):
