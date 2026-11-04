@@ -193,6 +193,8 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     ),
     # 0.7.0 — when a bin's label was last put on a printable sheet ('' = never).
     ("bins", "labels_printed_on", ("ALTER TABLE bins ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
+    # 0.10.0 — when an item's own sticker was last put on a printable sheet ('' = never).
+    ("items", "labels_printed_on", ("ALTER TABLE items ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -476,6 +478,7 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "price_basis": d["price_basis"],
         "price_updated_on": d["price_updated_on"],
         "bin_id": d.get("bin_id") or "",
+        "labels_printed_on": d.get("labels_printed_on") or "",
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
@@ -1145,6 +1148,21 @@ class InventoryStore:
             for b in ids:
                 con.execute("UPDATE bins SET labels_printed_on=?, updated_at=? WHERE id=?", (today, ts, b))
                 self._audit(con, "bin", b, "labels", actor, {"labels_printed_on": today})
+        return ids
+
+    def mark_item_labels_printed(self, item_ids, *, actor: str = "") -> list[str]:
+        """Record that these items' stickers went onto a printable sheet today (audited)."""
+        ids = list(dict.fromkeys(check_id("item", i) for i in (item_ids or [])))
+        if not ids:
+            return []
+        today, ts = today_iso(), now_iso()
+        with self._tx() as con:
+            for i in ids:
+                if con.execute("SELECT 1 FROM items WHERE id=?", (i,)).fetchone() is None:
+                    raise InventoryError(f"no item {i!r}")
+            for i in ids:
+                con.execute("UPDATE items SET labels_printed_on=?, updated_at=? WHERE id=?", (today, ts, i))
+                self._audit(con, "item", i, "labels", actor, {"labels_printed_on": today})
         return ids
 
     def list_bins(self) -> dict:

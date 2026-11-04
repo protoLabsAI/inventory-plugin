@@ -1,5 +1,5 @@
-"""Bin labels: the address a printed QR code opens, the public ``/b/<bin>`` hop, and the
-printable sheet.
+"""Bin and item labels: the address a printed QR code opens, the public ``/b/<bin>`` and
+``/i/<item>`` hops, and the printable sheets.
 
 A label is paper, so the URL it encodes must outlive any change to how the console opens a
 view. Every label encodes ``<base>/plugins/inventory/b/<BIN>``; that small public route then
@@ -20,6 +20,8 @@ from urllib.parse import quote, urlsplit
 PLUGIN_ID = "inventory"
 LABEL_PREFIX = "/b"  # under the public /plugins/inventory prefix
 LABEL_PATH = f"/plugins/{PLUGIN_ID}{LABEL_PREFIX}/"
+ITEM_PREFIX = "/i"  # an item's own label (0.10.0): Avery 5160 stickers
+ITEM_PATH = f"/plugins/{PLUGIN_ID}{ITEM_PREFIX}/"
 
 # The store's own id rule (store._ID_RE), so any bin the store can hold has a label URL. A
 # bin id is the only thing the public route ever sees or echoes.
@@ -43,6 +45,13 @@ def _sdk():
 def norm_bin_id(value) -> str | None:
     """The bin id upper-cased (the store keeps them upper-case), or ``None`` when it can't be one."""
     v = str(value or "").strip().upper()
+    return v if BIN_ID_RE.match(v) else None
+
+
+def norm_item_id(value) -> str | None:
+    """The item id as given (the store keeps item ids case-sensitive), or ``None`` when the
+    store could never hold it. Same rule as ``store._ID_RE``, so every item has a label URL."""
+    v = str(value or "").strip()
     return v if BIN_ID_RE.match(v) else None
 
 
@@ -114,14 +123,20 @@ def label_url(base: str, bin_id: str) -> str:
     return base.rstrip("/") + LABEL_PATH + quote(bin_id, safe="")
 
 
-def view_target(bin_id: str) -> str | None:
-    """The console link that opens this bin, from a host that has ``sdk.view_url`` (#4712)."""
+def item_label_url(base: str, item_id: str) -> str:
+    return base.rstrip("/") + ITEM_PATH + quote(item_id, safe="")
+
+
+def view_target(bin_id: str | None = None, *, item_id: str | None = None) -> str | None:
+    """The console link that opens this bin (or item), from a host that has ``sdk.view_url``
+    (#4712)."""
     sdk = _sdk()
     fn = getattr(sdk, "view_url", None) if sdk else None
     if fn is None:
         return None
+    params = {"item": item_id} if item_id else {"bin": bin_id}
     try:
-        return fn(PLUGIN_ID, None, {"bin": bin_id}) or None
+        return fn(PLUGIN_ID, None, params) or None
     except Exception:  # noqa: BLE001 — a refusal means no link, never a broken redirect
         return None
 
@@ -219,4 +234,106 @@ def older_host_page(bin_id: str, root: str) -> str:
         + ".</p>"
         + link
         + "</body></html>"
+    )
+
+
+def older_host_item_page(item_id: str, root: str) -> str:
+    """What a scanned item label shows when this console can't open a view from a link yet. It
+    names only the id that was scanned: the route reads no data."""
+    link = f'<p><a href="{_E(root, quote=True)}">Open the console</a></p>' if root else ""
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Item '
+        + _E(item_id)
+        + "</title><style>body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:2rem;line-height:1.5}"
+        ".id{font-family:ui-monospace,Menlo,monospace;font-size:1.6rem;font-weight:700;margin:0;word-break:break-all}"
+        "</style></head><body>"
+        f'<p class="id">{_E(item_id)}</p>'
+        "<p>This label is for item " + _E(item_id) + ". This agent's console needs a protoAgent update before a "
+        "label can open the item directly. Until then, open Inventory, go to Stock and search for "
+        + _E(item_id)
+        + ".</p>"
+        + link
+        + "</body></html>"
+    )
+
+
+#: Avery 5160 / 8160 (US Letter, 30 up): 3 columns × 10 rows of 2 5/8" × 1" labels; 0.5" top and
+#: bottom margins, 3/16" side margins, horizontal pitch 2 3/4" (so a 1/8" gap), vertical pitch 1".
+#: 3 × 2.625 + 2 × 0.125 + 2 × 0.1875 = 8.5" and 10 × 1 + 2 × 0.5 = 11". The page is laid out in
+#: absolute inches with a zero @page margin so the browser's own margins can't shift the grid;
+#: print at 100% ("Actual size"), never "Fit to page".
+AVERY_5160 = {
+    "cols": 3,
+    "rows": 10,
+    "w": 2.625,
+    "h": 1.0,
+    "top": 0.5,
+    "side": 0.1875,
+    "pitch_x": 2.75,
+    "pitch_y": 1.0,
+}
+ITEM_LABELS_PER_SHEET = AVERY_5160["cols"] * AVERY_5160["rows"]
+
+_ITEM_CSS = """
+  @page{size:8.5in 11in;margin:0}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:#fff;color:#000;font-family:Helvetica,Arial,sans-serif}
+  .bar{display:flex;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid #ccc;font-size:14px}
+  .bar button{font:inherit;padding:6px 14px;border:1px solid #000;background:#000;color:#fff;border-radius:4px;cursor:pointer}
+  .page{position:relative;width:8.5in;height:11in;margin:0.25in auto;background:#fff;box-shadow:0 0 0 1px #ddd;overflow:hidden;break-after:page}
+  .page:last-child{break-after:auto}
+  .label{position:absolute;width:2.625in;height:1in;display:flex;align-items:center;gap:0.08in;padding:0.06in 0.1in 0.06in 0.07in;overflow:hidden}
+  .label.blank{visibility:hidden}
+  .qr{flex:0 0 0.85in;width:0.85in;height:0.85in}
+  .txt{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:0.02in;line-height:1.15}
+  .name{font-size:8.5pt;font-weight:700;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+  .meta{font-size:7.5pt;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .iid{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:6.5pt;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .guide .label{outline:1px dashed #bbb;outline-offset:-1px}
+  @media print{.bar{display:none}.page{margin:0;box-shadow:none}.guide .label{outline:none}}
+"""
+
+
+def item_sheet_html(items: list[dict], base: str, *, start_at: int = 1) -> str:
+    """Avery 5160 sheets of item labels: QR on the left, then name (two lines at most),
+    condition · bin, and the id. No price: it changes, and the sticker stays.
+
+    ``start_at`` (1–30) skips that many minus one positions on the FIRST sheet, so a partly used
+    sheet can go back through the printer."""
+    g = AVERY_5160
+    per = ITEM_LABELS_PER_SHEET
+    start = min(max(int(start_at or 1), 1), per)
+    slots: list[dict | None] = [None] * (start - 1) + list(items)
+    pages = []
+    for p in range(0, len(slots), per):
+        cells = []
+        for k, it in enumerate(slots[p : p + per]):
+            row, col = divmod(k, g["cols"])
+            pos = f'style="left:{g["side"] + col * g["pitch_x"]:.4f}in;top:{g["top"] + row * g["pitch_y"]:.4f}in"'
+            if it is None:
+                cells.append(f'<div class="label blank" {pos}></div>')
+                continue
+            meta = " · ".join(
+                x for x in (str(it.get("condition") or "").strip(), str(it.get("bin_id") or "").strip()) if x
+            )
+            cells.append(
+                f'<div class="label" {pos}>'
+                + qr_svg(item_label_url(base, it["id"]))
+                + '<div class="txt">'
+                + f'<div class="name">{_E(str(it.get("name") or ""))}</div>'
+                + (f'<div class="meta">{_E(meta)}</div>' if meta else "")
+                + f'<div class="iid">{_E(it["id"])}</div>'
+                + "</div></div>"
+            )
+        pages.append('<div class="page">' + "".join(cells) + "</div>")
+    count, sheets = len(items), len(pages)
+    skip = f" Starting at label {start} on the first sheet." if start > 1 else ""
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Item labels</title>'
+        f'<style>{_ITEM_CSS}</style></head><body class="guide">'
+        '<div class="bar"><button type="button" onclick="window.print()">Print</button>'
+        f"<span>{count} label{'s' if count != 1 else ''} on {sheets} Avery 5160 sheet{'s' if sheets != 1 else ''}."
+        f"{skip} Print at 100% (Actual size), not Fit to page. "
+        f"Each opens its item at {_E(base)}{_E(ITEM_PATH)}&lt;item&gt;</span></div>" + "".join(pages) + "</body></html>"
     )

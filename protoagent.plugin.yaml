@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.9.2
+version: 0.10.0
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -58,6 +58,8 @@ views:
 # entry the route 401s on a token-gated host. It reads no data and answers the same for any valid id.
 public_paths:
   - /plugins/inventory/b/
+  # The item-label hop (0.10.0, GET /plugins/inventory/i/<ITEM>): same contract and same reason.
+  - /plugins/inventory/i/
 
 # Editable in Settings ▸ Plugins (ADR 0019).
 settings:

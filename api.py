@@ -303,13 +303,49 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     @r.post("/labels/sheet")
     async def _label_sheet(body: dict | None = None) -> dict:
         """Build a printable page of labels: ``ids``, or ``unprinted``, or ``from``/``to``, or
-        ``all``. Records the bins as printed (``mark``, default true) in the same call."""
-        from .labels import label_base, sheet_html
+        ``all`` for BINS; or ``items`` (a list of item ids, with an optional ``start_at`` 1–30)
+        for item stickers on Avery 5160. Records them as printed (``mark``, default true) in the
+        same call."""
+        from .labels import ITEM_LABELS_PER_SHEET, item_sheet_html, label_base, sheet_html
 
         body = body or {}
         info = label_base(cfg)
         if not info["base"]:
             raise HTTPException(status_code=409, detail=info["problem"])
+        if "items" in body:
+            want = body.get("items")
+            if not isinstance(want, list) or not want:
+                raise HTTPException(status_code=400, detail="items must be a non-empty list of item ids")
+            if len(want) > 300:
+                raise HTTPException(status_code=400, detail="at most 300 item labels (10 sheets) at a time")
+            try:
+                raw_start = body.get("start_at")
+                start_at = 1 if raw_start in (None, "") else int(raw_start)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="start_at must be a label number from 1 to 30") from exc
+            if not 1 <= start_at <= ITEM_LABELS_PER_SHEET:
+                raise HTTPException(status_code=400, detail="start_at must be a label number from 1 to 30")
+            picked = []
+            for raw in dict.fromkeys(str(i or "").strip() for i in want):
+                it = store.get_item(raw) if raw else None
+                if it is None:
+                    raise HTTPException(status_code=400, detail=f"no item {raw!r}")
+                picked.append(it)
+            ids = [it["id"] for it in picked]
+            if body.get("mark", True):
+                try:
+                    store.mark_item_labels_printed(ids, actor=ACTOR)
+                except InventoryError as exc:
+                    _raise(exc)
+                for i in ids:
+                    emit("item.changed", {"id": i, "action": "labels"})
+            return {
+                "kind": "items",
+                "ids": ids,
+                "base": info["base"],
+                "phone_reachable": info["phone_reachable"],
+                "html": item_sheet_html(picked, info["base"], start_at=start_at),
+            }
         bins = sorted(store.list_bins()["bins"], key=lambda b: _bin_order(b["id"]))
         by_id = {b["id"]: b for b in bins}
         if isinstance(body.get("ids"), list):

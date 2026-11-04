@@ -9,7 +9,16 @@ it own theme tokens + the init handshake.
 
 from __future__ import annotations
 
-from .labels import LABEL_PREFIX, console_root, norm_bin_id, older_host_page, view_target
+from .labels import (
+    ITEM_PREFIX,
+    LABEL_PREFIX,
+    console_root,
+    norm_bin_id,
+    norm_item_id,
+    older_host_item_page,
+    older_host_page,
+    view_target,
+)
 
 VIEW_PATH = "/view"
 
@@ -511,6 +520,8 @@ PAGE = r"""<!doctype html>
     h += '<div class="dsec"><h3 class="dh">Details</h3>' +
       kv("Bin", (it.bin_id ? '<button class="pl-btn pl-btn--ghost pl-btn--sm bin-id" data-bin="' + esc(it.bin_id) + '">' + esc(binText(it.bin_id)) + "</button>" : '<span class="muted">Not in a bin</span>') +
         (it.status === "sold" && !it.bin_id ? "" : ' <button class="pl-btn pl-btn--sm" data-act="movebin" data-id="' + esc(it.id) + '">' + (it.bin_id ? "Move" : "Put in a bin") + "</button>")) +
+      kv("Label", (it.labels_printed_on ? '<span>Printed ' + esc(it.labels_printed_on) + "</span>" : '<span class="muted">Never printed</span>') +
+        ' <button class="pl-btn pl-btn--sm" data-act="itemlabel" data-id="' + esc(it.id) + '">Print label</button>') +
       kv("System", esc(it.system) || '<span class="muted">—</span>') +
       kv("Condition", esc(it.condition) || '<span class="muted">—</span>') +
       kv("Category", esc(it.category) || '<span class="muted">—</span>') +
@@ -562,9 +573,18 @@ PAGE = r"""<!doctype html>
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
-  let startDone = !START_BIN;
+  // An item label opens `?item=<id>` (item ids keep their case, unlike bins).
+  const START_ITEM = (() => { try { return (new URLSearchParams(location.search || "").get("item") || "").trim(); } catch { return ""; } })();
+  let startDone = !START_BIN && !START_ITEM;
   function applyStartBin() {
-    startDone = true; state.tab = "bins"; render();
+    startDone = true;
+    if (START_ITEM) {
+      state.tab = "stock"; render();
+      if (itemById(START_ITEM)) return openItem(START_ITEM);
+      toast("There's no item " + START_ITEM + " here. It may have been deleted, or the label belongs to another agent.", "warning");
+      return;
+    }
+    state.tab = "bins"; render();
     if (binById(START_BIN)) return openBin(START_BIN);
     toast("There's no bin " + START_BIN + " here. It may have been deleted, or the label belongs to another agent.", "warning");
   }
@@ -715,6 +735,7 @@ PAGE = r"""<!doctype html>
     bar.innerHTML = count +
       '<button class="pl-btn pl-btn--sm pl-btn--primary" id="copy-md" title="System header, then one line per item: Name NoS — $20">Copy list</button>' +
       '<button class="pl-btn pl-btn--sm" data-act="movesel">Move to bin…</button>' +
+      '<button class="pl-btn pl-btn--sm" data-act="labelsel">Print labels</button>' +
       '<button class="pl-btn pl-btn--sm pl-btn--ghost" id="sel-clear">Clear</button>' +
       (narrow() ? "" : '<span class="pl-kbd">⌘C</span>');
   }
@@ -897,6 +918,38 @@ PAGE = r"""<!doctype html>
         let r;
         try { r = await api("/labels/sheet", "POST", req); } catch (e) { if (w) w.close(); throw e; }
         const n = r.ids.length, what = n + " label" + (n === 1 ? "" : "s");
+        if (w) {
+          w.document.open(); w.document.write(r.html); w.document.close();
+          toast("Opened " + what + " in a new tab. Print from there.", "success"); await refresh(); return true;
+        }
+        const url = URL.createObjectURL(new Blob([r.html], { type: "text/html" }));
+        $("#dlg-result").innerHTML = '<div class="pl-callout pl-callout--warning span2">The browser blocked the new tab. <a href="' + url + '" target="_blank" rel="noopener">Open the sheet of ' + esc(what) + "</a> and print from there.</div>";
+        await refresh(); return false;
+      },
+    });
+  }
+  // Item stickers on Avery 5160 (30 to a US Letter sheet). The sheet opens in a NEW tab: this
+  // frame has no allow-modals, so printing from inside it does nothing.
+  async function itemLabelsDialog(ids, title) {
+    const list = [...new Set([...(ids || [])])].filter((id) => itemById(id));
+    if (!list.length) return toast("Nothing to label: those items no longer exist.", "warning");
+    let info;
+    try { info = await api("/labels/base"); } catch (e) { return toast(e.message, "error"); }
+    if (!info.base) return toast(info.problem, "error");
+    const n = list.length, sheets = Math.ceil(n / 30);
+    const where = '<div class="span2 muted">' + n + " label" + (n === 1 ? "" : "s") + " on Avery 5160 (30 to a sheet). Each opens its item at " + esc(info.base) + "/plugins/inventory/i/&lt;item&gt;." +
+      (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + " Print at 100% (Actual size), not Fit to page.</div>";
+    await dialog({
+      title: title || (n === 1 ? "Print a label for " + (itemById(list[0]).name || list[0]) : "Print " + n + " item labels"),
+      submit: "Open the sheet",
+      body: field("start", "Start at label", 1, { type: "number", step: "1", hint: "On a partly used sheet, the first free label: 1 is top left, 30 is bottom right, counting across. Only the first sheet" + (sheets > 1 ? " of " + sheets : "") + " skips." }) + where,
+      onSubmit: async (v) => {
+        const start = Math.round(Number(v.start || 1));
+        if (!(start >= 1 && start <= 30)) { toast("Start at a label from 1 to 30", "warning"); return false; }
+        const w = window.open("", "_blank");  // before any await: a new tab needs the click itself
+        let r;
+        try { r = await api("/labels/sheet", "POST", { items: list, start_at: start }); } catch (e) { if (w) w.close(); throw e; }
+        const what = r.ids.length + " label" + (r.ids.length === 1 ? "" : "s");
         if (w) {
           w.document.open(); w.document.write(r.html); w.document.close();
           toast("Opened " + what + " in a new tab. Print from there.", "success"); await refresh(); return true;
@@ -1196,7 +1249,7 @@ PAGE = r"""<!doctype html>
       const row = (i) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + (UNSOLD.includes(i.status) ? "to sell" : "kept") + "</span></div>" + sel(i) + "</li>";
       const sells = items.filter((i) => UNSOLD.includes(i.status)), kept = items.filter((i) => !UNSOLD.includes(i.status));
       return ['<h3 class="dh">Put each piece in a bin</h3><p class="muted">After the first, each piece defaults to the last bin you picked.</p>' +
-        (sells.length ? '<ul class="list">' + sells.map(row).join("") + "</ul>" : "") + (kept.length ? '<div class="pl-eyebrow gap-t">Kept (optional)</div><ul class="list">' + kept.map(row).join("") + "</ul>" : ""), btnP("sc-done", "Done") + (sells.length ? btn("sc-toprices", "Back to prices") : "")];
+        (sells.length ? '<ul class="list">' + sells.map(row).join("") + "</ul>" : "") + (kept.length ? '<div class="pl-eyebrow gap-t">Kept (optional)</div><ul class="list">' + kept.map(row).join("") + "</ul>" : ""), btnP("sc-done", "Done") + (sells.length ? btn("sc-done-labels", "Done and print " + sells.length + " label" + (sells.length === 1 ? "" : "s")) + btn("sc-toprices", "Back to prices") : "")];
     },
   };
   function scPaint() {
@@ -1262,7 +1315,7 @@ PAGE = r"""<!doctype html>
     } catch (e) { toast(e.message, "error"); } finally { SC.busy = false; }
     scPaint(); poll();
   }
-  async function finishScan() {
+  async function finishScan(labels = false) {
     const placements = {};
     document.querySelectorAll("#scan-flow [data-binsel]").forEach((el) => { if (el.value) placements[el.dataset.binsel] = el.value; });
     try {
@@ -1271,6 +1324,11 @@ PAGE = r"""<!doctype html>
       const binned = Object.keys(placements).length, binsUsed = [...new Set(Object.values(placements))];
       toast(clean(lotName(SC.lotId) || SC.boxName) + ": " + binned + " binned" + (binsUsed.length === 1 ? " in " + binsUsed[0] : "") + (kept ? ", " + kept + " kept" : ""), "success");
       scReset(); closeDrawer(); await refresh();
+      // "Done and print labels": the sell pieces just binned (kept pieces don't need a sticker).
+      if (labels) {
+        const sells = scan.item_ids.map(itemById).filter((i) => i && UNSOLD.includes(i.status)).map((i) => i.id);
+        if (sells.length) await itemLabelsDialog(sells, "Print labels for these " + sells.length + " piece" + (sells.length === 1 ? "" : "s"));
+      }
     } catch (e) { toast(e.message, "error"); }
   }
   async function scanPhoto(file) {
@@ -1339,6 +1397,7 @@ PAGE = r"""<!doctype html>
     "sc-tobins": () => { SC.step = 6; scPaint(); },
     "sc-toprices": () => { SC.step = 5; scPaint(); poll(); },
     "sc-done": () => finishScan(),
+    "sc-done-labels": () => finishScan(true),
     "sc-discard": () => discardScan(),
   };
   // Next ▸ Needs a look: every scan not finished, newest first.
@@ -1364,6 +1423,7 @@ PAGE = r"""<!doctype html>
     editlot: (id) => lotDialog(state.lots.find((l) => l.id === id)), dellot: deleteLot,
     newbins: () => newBinsDialog(), printlabels: () => labelsDialog(), printlabel: (id) => labelsDialog(id), editbin: (id) => editBinDialog(id), delbin: deleteBin,
     movebin: (id) => moveDialog([id]), movesel: () => moveDialog(state.selected),
+    itemlabel: (id) => itemLabelsDialog([id]), labelsel: () => itemLabelsDialog(state.selected),
     movehere: (id) => startMove(id), endmove: () => { endMove(); render(); }, domove: () => doMove(),
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
@@ -1462,7 +1522,7 @@ PAGE = r"""<!doctype html>
 
 
 def build_view_router(cfg: dict):
-    """The PUBLIC router — mounted at ``/plugins/inventory``: the page, and the bin-label hop."""
+    """The PUBLIC router — mounted at ``/plugins/inventory``: the page, and the bin- and item-label hops."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
 
@@ -1487,5 +1547,20 @@ def build_view_router(cfg: dict):
         if target:
             return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
         return HTMLResponse(older_host_page(bid, console_root()), headers={"Cache-Control": "no-store"})
+
+    # The address printed on an ITEM label (0.10.0): same contract as the bin hop. It takes only
+    # an item id, reads no data (an item that exists and one that doesn't answer the same) and
+    # echoes only that id.
+    @r.get(ITEM_PREFIX + "/{item_id}", include_in_schema=False)
+    async def _item_label(item_id: str):
+        from fastapi.responses import PlainTextResponse, RedirectResponse
+
+        iid = norm_item_id(item_id)
+        if iid is None:
+            return PlainTextResponse("Not an item label.", status_code=404, headers={"Cache-Control": "no-store"})
+        target = view_target(item_id=iid)
+        if target:
+            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(older_host_item_page(iid, console_root()), headers={"Cache-Control": "no-store"})
 
     return r
