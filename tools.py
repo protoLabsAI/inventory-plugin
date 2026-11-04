@@ -477,6 +477,38 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "priced"})
         return json.dumps({"ok": True, "scan_id": scan["id"], "pricing": scan["pricing"]})
 
+    @tool
+    def inventory_scan_sealed_price(
+        scan_id: str,
+        target: float | None = None,
+        low: float | None = None,
+        high: float | None = None,
+        n: int = 0,
+        query: str = "",
+        basis: str = "",
+        sealed_fees: float | None = None,
+        split_fees: float | None = None,
+    ) -> str:
+        """In a box scan's pricing turn: record what the box would sell for SEALED (from eBay sold comps: target=median, low=p25, high=p75, n, the query, and a basis like "eBay sold comps (8 sold, sealed, incl. shipping)"), plus the marketplace fees on that sealed target (sealed_fees) and on the sum of the pieces' targets (split_fees) from ebay_net_proceeds. This is a comparison for the operator, not a price on an item. target null = no usable sealed comps (say why in basis); a fee null = not computed. Call it before inventory_scan_pricing_done."""
+        try:
+            scan = store.record_sealed_price(
+                scan_id,
+                low=low,
+                target=target,
+                high=high,
+                n=n,
+                query=query,
+                basis=basis,
+                sealed_fees=sealed_fees,
+                split_fees=split_fees,
+                actor=ACTOR,
+                timeout_minutes=tmo,
+            )
+        except InventoryError as exc:
+            return _err(exc)
+        emit("scan.changed", {"id": scan["id"], "state": scan["state"], "action": "sealed_priced"})
+        return json.dumps({"ok": True, "scan_id": scan["id"], "sealed_vs_split": scan.get("sealed_vs_split")})
+
     # ── listing drafts: the turn the plugin starts on "Draft listing" (drafts.py) ───
     @tool
     def inventory_draft_item(item_id: str) -> str:
@@ -578,6 +610,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         inventory_scan_propose,
         inventory_scan_fail,
         inventory_scan_pricing_done,
+        inventory_scan_sealed_price,
         inventory_draft_item,
         inventory_draft_write,
         inventory_draft_fail,

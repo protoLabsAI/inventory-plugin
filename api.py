@@ -525,6 +525,21 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         _scan_changed(scan, "price")
         return {"scan": scan}
 
+    @r.post("/scans/{scan_id}/sell-sealed")
+    async def _scan_sell_sealed(scan_id: str) -> dict:
+        try:
+            scan = store.sell_sealed(scan_id, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        for i in scan["item_ids"]:
+            emit("item.changed", {"id": i, "action": "sold_sealed"})
+        _scan_changed(scan, "sell_sealed")
+        return {"scan": scan}
+
+    @r.get("/lots/{lot_id}/split-check")
+    async def _lot_split_check(lot_id: str) -> dict:
+        return {"check": store.split_check(lot_id, timeout_minutes=tmo)}
+
     @r.post("/scans/{scan_id}/finish")
     async def _scan_finish(scan_id: str, body: dict | None = None) -> dict:
         try:
