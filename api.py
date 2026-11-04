@@ -235,6 +235,11 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         emit("item.changed", {"id": listing["item_id"], "action": "listing_ended"})
         return {"listing": listing}
 
+    @r.get("/listings/to-end")
+    async def _listings_to_end() -> dict:
+        """The double-sell guard: listings still up on a marketplace for items that sold elsewhere."""
+        return {"listings": store.listings_to_end()}
+
     @r.get("/sales")
     async def _sales(lot_id: str = "", limit: int = Query(500, ge=1, le=5000)) -> dict:
         return {"sales": store.list_sales(lot_id=lot_id, limit=limit)}

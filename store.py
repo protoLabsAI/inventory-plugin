@@ -40,7 +40,11 @@ STATUSES = ("planned", "available", "listed", "pending", "sold", "kept", "withdr
 UNSOLD = ("planned", "available", "listed", "pending")
 #: States an item cannot be sold or listed from.
 CLOSED = ("sold", "kept", "withdrawn")
-LISTING_STATES = ("active", "ended", "sold")
+#: ``needs_end`` (0.12.0): the item sold somewhere else while this listing was live, so the
+#: marketplace still shows it for sale. It stays on the books until the operator ends it there
+#: ("I ended it" → ``ended``). The double-sell guard: a sale never silently closes a listing on
+#: another channel, because nothing here can take that listing down for you.
+LISTING_STATES = ("active", "ended", "sold", "needs_end")
 OBSERVATION_SOURCES = ("ebay_sold", "ebay_active", "amazon", "retail", "manual", "other")
 OBSERVATION_FIELDS = ("source", "n", "p25", "median", "p75", "query", "basis", "notes")
 
@@ -348,6 +352,13 @@ def _scan_row_to_dict(r: sqlite3.Row, timeout_minutes: int = SCAN_TIMEOUT_MINUTE
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
+
+
+def same_channel(a, b) -> bool:
+    """Two channel names are the same marketplace: case, spaces and punctuation don't count
+    ("eBay" = "ebay" = "E-Bay")."""
+    norm = lambda v: re.sub(r"[^a-z0-9]", "", str(v or "").lower())  # noqa: E731
+    return bool(norm(a)) and norm(a) == norm(b)
 
 
 def to_cents(value) -> int | None:
@@ -941,6 +952,8 @@ class InventoryStore:
     def end_listing(self, listing_id: int, *, state: str = "ended", ended_on: str = "", actor: str = "") -> dict:
         if state == "sold":
             raise InventoryError("record the sale with mark_sold — it closes the listing as sold itself")
+        if state == "needs_end":
+            raise InventoryError("needs_end is set by a sale on another channel, not by hand")
         if state not in LISTING_STATES:
             raise InventoryError(f"unknown listing state {state!r}; one of ended")
         with self._tx() as con:
@@ -1014,6 +1027,7 @@ class InventoryStore:
                     f"item {item_id!r} is already {row['status']}{was}; pass force=True to record another sale"
                 )
             remaining = max(0, int(row["quantity"] or 1) - qty)
+            needs_end: list[int] = []
             cur = con.execute(
                 "INSERT INTO sales(item_id, channel, sold_on, price_cents, shipping_charged_cents, fees_cents, "
                 "shipping_cost_cents, net_cents, quantity, notes, packed_on) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -1036,10 +1050,20 @@ class InventoryStore:
                 con.execute("UPDATE items SET quantity=?, updated_at=? WHERE id=?", (remaining, ts, item_id))
             else:
                 con.execute("UPDATE items SET status='sold', updated_at=? WHERE id=?", (ts, item_id))
-                con.execute(
-                    "UPDATE listings SET state='sold', ended_on=? WHERE item_id=? AND state='active'",
-                    (sold_on or today_iso(), item_id),
-                )
+                # A live listing on the channel it sold on closes as sold. One on ANY OTHER channel is
+                # still up on that marketplace: flag it so Next asks the operator to end it there,
+                # rather than marking it closed when nothing has taken it down (the double-sell guard).
+                for lst in con.execute(
+                    "SELECT id, channel FROM listings WHERE item_id=? AND state='active'", (item_id,)
+                ).fetchall():
+                    if same_channel(lst["channel"], channel):
+                        con.execute(
+                            "UPDATE listings SET state='sold', ended_on=? WHERE id=?",
+                            (sold_on or today_iso(), lst["id"]),
+                        )
+                    else:
+                        con.execute("UPDATE listings SET state='needs_end' WHERE id=?", (lst["id"],))
+                        needs_end.append(lst["id"])
             self._audit(
                 con,
                 "sale",
@@ -1053,13 +1077,37 @@ class InventoryStore:
                     "net": dollars(net_c),
                     "quantity": qty,
                     "remaining": remaining,
+                    **({"needs_end": needs_end} if needs_end else {}),
                 },
             )
+            for lid in needs_end:
+                self._audit(con, "listing", lid, "needs_end", actor, {"sold_on": channel})
             out = con.execute("SELECT * FROM sales WHERE id=?", (cur.lastrowid,)).fetchone()
         sale = _sale_row_to_dict(out)
         sale["remaining_quantity"] = remaining
+        sale["needs_end"] = needs_end
         sale["item_status"] = "sold" if remaining == 0 else row["status"]
         return sale
+
+    def listings_to_end(self) -> list[dict]:
+        """Listings still up on a marketplace for an item that sold elsewhere (``needs_end``),
+        oldest first, each with the item's name and the sale that caused it."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT l.*, i.name AS item_name, i.bin_id AS bin_id FROM listings l "
+                "JOIN items i ON i.id = l.item_id WHERE l.state='needs_end' ORDER BY l.id"
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = _listing_row_to_dict(r)
+                d["item_name"] = r["item_name"]
+                sale = con.execute(
+                    "SELECT channel, sold_on FROM sales WHERE item_id=? ORDER BY id DESC LIMIT 1", (r["item_id"],)
+                ).fetchone()
+                d["sold_channel"] = sale["channel"] if sale else ""
+                d["sold_on"] = sale["sold_on"] if sale else ""
+                out.append(d)
+        return out
 
     def list_sales(self, *, lot_id: str = "", limit: int = 500) -> list[dict]:
         with self._read() as con:

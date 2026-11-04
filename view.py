@@ -168,7 +168,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -266,6 +266,7 @@ PAGE = r"""<!doctype html>
     const snap = c.snapshot || {};
     const who = nameOf(a.entity_id) || c.name || snap.name || (snap.item && snap.item.name) || a.entity_id;
     if (a.entity === "sale" && a.action !== "packed") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
+    if (a.entity === "listing" && a.action === "needs_end") return "Listing " + a.entity_id + " is still up after a sale" + (c.sold_on ? " on " + c.sold_on : "") + ": end it there";
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
     if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
     if (a.entity === "bin" && a.action === "labels") return "Printed the label for bin " + a.entity_id;
@@ -505,7 +506,7 @@ PAGE = r"""<!doctype html>
   }
 
   function itemBody(it, audit, draft = null) {
-    const live = (it.listings || []).filter((l) => l.state === "active");
+    const live = (it.listings || []).filter((l) => l.state === "active" || l.state === "needs_end");
     const obs = (it.observations || [])[0];
     let h = '<div class="dsec"><div class="drow">' + badge(it.status) + (it.quantity > 1 ? '<span class="muted">×' + esc(it.quantity) + "</span>" : "") + (isStale(it) ? staleBadge : "") + "</div>";
     if (it.status === "sold") {
@@ -518,7 +519,7 @@ PAGE = r"""<!doctype html>
       '<div class="muted">' + esc([it.price_updated_on, obs && obs.n ? obs.n + " comps" : ""].filter(Boolean).join(" · ")) + "</div>" +
       '<div class="drow"></div><button class="pl-btn pl-btn--sm" data-act="price" data-id="' + esc(it.id) + '">Set price</button></div>';
     h += '<div class="dsec" id="lsec"><h3 class="dh">Listing' + (draft && LSTATE[draft.listing_state] ? " " + draftBadge(draft.listing_state) : "") + "</h3>" +
-      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + "</span></div>").join("") : "") +
+      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + (l.state === "needs_end" ? ' <span class="pl-badge pl-badge--warning">still up: end it</span> <button class="pl-btn pl-btn--sm" data-act="ended" data-id="' + esc(l.id) + '">I ended it</button>' : "") + "</span></div>").join("") : "") +
       draftBody(it, draft) +
       (["sold", "kept", "withdrawn"].includes(it.status) ? "" : '<div class="drow gap-t"><button class="pl-btn pl-btn--sm pl-btn--ghost" data-act="list" data-id="' + esc(it.id) + '">Add a listing by hand</button></div>') + "</div>";
     h += '<div class="dsec"><h3 class="dh">Details</h3>' +
@@ -569,12 +570,13 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({}))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
     if (vcfg && Number(vcfg.stale_price_days) > 0) STALE_DAYS = Number(vcfg.stale_price_days);
     state.drafts = Object.fromEntries((drafts.drafts || []).map((d) => [d.item_id, d])); state.maxBulk = drafts.max_bulk || 10;
+    state.toEnd = (toEnd && toEnd.listings) || [];
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
@@ -638,9 +640,19 @@ PAGE = r"""<!doctype html>
   function sec(title, n, rows, see, extra = "") {
     return '<section class="sec"><div class="sec-head"><h2 class="sec-title">' + esc(title) + ' <span class="muted">' + n + "</span></h2>" + (see || extra ? '<span class="row-acts">' + extra + (see ? '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-see="' + see + '">See all ' + n + "</button>" : "") + "</span>" : "") + '</div><ul class="list">' + rows + "</ul></section>";
   }
+  // The double-sell guard: an item that sold somewhere else is still up on this marketplace.
+  // Nothing here can take a listing down, so the operator ends it there and says so.
+  const safeUrl = (u) => (/^https?:\/\//.test(String(u || "")) ? String(u) : "");
+  function toEndRows(xs) {
+    return xs.map((l) => '<li><div class="irow"><span class="irow-main"><span class="irow-name">' + esc(l.item_name) + '</span><span class="irow-sub">' +
+      esc(["sold" + (l.sold_on ? " " + l.sold_on : "") + (l.sold_channel ? " on " + l.sold_channel : ""), "still up on " + l.channel].join(" · ")) + "</span></span>" +
+      (safeUrl(l.url) ? '<a class="pl-btn pl-btn--sm" href="' + esc(safeUrl(l.url)) + '" target="_blank" rel="noopener">Open listing</a>' : "") +
+      '</div><button class="pl-btn pl-btn--sm pl-btn--primary rowact" data-act="ended" data-id="' + esc(l.id) + '" aria-label="I ended the listing for ' + esc(l.item_name) + '">I ended it</button></li>').join("");
+  }
   function renderNext() {
     const items = state.items;
     let h = "";
+    if (state.toEnd && state.toEnd.length) h += sec("End these listings", state.toEnd.length, toEndRows(state.toEnd), "");
     if (state.toPack.length) {
       const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
         sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
@@ -888,7 +900,7 @@ PAGE = r"""<!doctype html>
         field("sold_on", "Sold on", new Date().toISOString().slice(0, 10)) + field("quantity", "Quantity", 1, { type: "number", step: "1" }) +
         field("shipping_charged", "Shipping charged ($)", "", { type: "number", step: "0.01" }) + field("fees", "Fees ($)", "", { type: "number", step: "0.01", hint: "Marketplace + payment fees." }) +
         field("shipping_cost", "Shipping cost ($)", "", { type: "number", step: "0.01" }) + field("notes", "Notes", "") +
-        '<div class="span2 muted">net = price + shipping charged − fees − shipping cost. Live listings are closed.</div>',
+        '<div class="span2 muted">net = price + shipping charged − fees − shipping cost. A live listing on the same channel closes; one anywhere else shows on Next to end.</div>',
       onSubmit: async (v) => {
         const r = await api("/items/" + encodeURIComponent(id) + "/sold", "POST", { price: num(v.price), channel: v.channel, sold_on: v.sold_on, quantity: Number(v.quantity || 1), shipping_charged: num(v.shipping_charged) || 0, fees: num(v.fees) || 0, shipping_cost: num(v.shipping_cost) || 0, notes: v.notes });
         toast("Sold — net " + fmt(r.sale.net), "success"); await refresh();
@@ -1030,6 +1042,11 @@ PAGE = r"""<!doctype html>
       toast("Moved " + r.moved.length + " to " + to, "success");
       endMove(); await refresh(); go("bins"); openBin(to);
     } catch (e) { toast(e.message, "error"); }
+  }
+  async function endedListing(listingId) {
+    try { await api("/listings/" + encodeURIComponent(listingId) + "/end", "POST", { state: "ended" }); }
+    catch (e) { return toast(e.message, "error"); }
+    toast("Marked ended", "success"); await refresh();
   }
   async function packed(saleId) {
     try { await api("/sales/" + encodeURIComponent(saleId) + "/packed", "POST"); toast("Packed", "success"); } catch (e) { toast(e.message, "error"); }
@@ -1556,6 +1573,7 @@ PAGE = r"""<!doctype html>
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
     packed: (id) => packed(id),
+    ended: (id) => endedListing(id),
     "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };

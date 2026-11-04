@@ -232,7 +232,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         notes: str = "",
         force: bool = False,
     ) -> str:
-        """Record a sale: writes the sale (net = price + shipping charged − fees − shipping cost), decrements the item's quantity or, on the last unit, sets it to sold and closes its live listings. `channel` is where it sold (eBay, Facebook, local, r/miniswap …). Dollars; `sold_on` YYYY-MM-DD, default today. An item that is already sold is refused — a retried call must not double the revenue — unless force=True."""
+        """Record a sale: writes the sale (net = price + shipping charged − fees − shipping cost), decrements the item's quantity or, on the last unit, sets it to sold: a live listing on the SAME channel closes as sold, one on any other channel is flagged needs_end (still up on that marketplace; the result lists them under "needs_end" — tell the operator to end it there). `channel` is where it sold (eBay, Facebook, local, r/miniswap …). Dollars; `sold_on` YYYY-MM-DD, default today. An item that is already sold is refused — a retried call must not double the revenue — unless force=True."""
         try:
             sale = store.mark_sold(
                 item_id,
@@ -263,7 +263,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
         state: str = "ended",
         notes: str = "",
     ) -> str:
-        """Track where an item is listed. action="add" (item_id, channel, url, price) records a live listing and moves an available item to listed; action="end" (listing_id, state=ended|sold) closes it and returns the item to available if nothing else is live. Dollars."""
+        """Track where an item is listed. action="add" (item_id, channel, url, price) records a live listing and moves an available item to listed; action="end" (listing_id, state=ended) closes it and returns the item to available if nothing else is live; action="to_end" lists listings still up on a marketplace for items that sold elsewhere (end them there, then action="end"). Dollars."""
         try:
             if action == "add":
                 listing = store.add_listing(item_id, channel=channel, url=url, price=price, notes=notes, actor=ACTOR)
@@ -273,7 +273,9 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
                 listing = store.end_listing(int(listing_id), state=state, actor=ACTOR)
                 emit("item.changed", {"id": listing["item_id"], "action": "listing_ended"})
                 return json.dumps({"ok": True, "listing": listing})
-            return json.dumps({"ok": False, "error": "action must be 'add' or 'end'"})
+            if action == "to_end":
+                return json.dumps({"ok": True, "listings": store.listings_to_end()})
+            return json.dumps({"ok": False, "error": "action must be 'add', 'end' or 'to_end'"})
         except InventoryError as exc:
             return _err(exc)
 
