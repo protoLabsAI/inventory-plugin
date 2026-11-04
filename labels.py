@@ -337,3 +337,218 @@ def item_sheet_html(items: list[dict], base: str, *, start_at: int = 1) -> str:
         f"{skip} Print at 100% (Actual size), not Fit to page. "
         f"Each opens its item at {_E(base)}{_E(ITEM_PATH)}&lt;item&gt;</span></div>" + "".join(pages) + "</body></html>"
     )
+
+
+# ── label stocks (0.15.0) ───────────────────────────────────────────────────────────────
+#: What a sheet can be printed on. Sheet stocks are laid out in absolute inches on a zero-margin
+#: US Letter page; roll stocks (thermal printers) get one label per page, the page being the
+#: label (`@page { size: W H; margin: 0 }`), which is how Dymo, Zebra, Rollo and Brother drivers
+#: take a browser print. Print at 100% (Actual size) either way.
+#:
+#: Sizes, from the makers' published media specs:
+#: - Avery 5160 / 8160: see AVERY_5160 above.
+#: - Avery 5163 / 8163: 4″ × 2″, 2 across × 5 down, 0.5″ top and bottom, 5⁄32″ (0.15625″) side
+#:   margins, 3⁄16″ between the columns (4.1875″ pitch), no gap between rows:
+#:   2 × 4 + 0.1875 + 2 × 0.15625 = 8.5″ and 5 × 2 + 2 × 0.5 = 11″.
+#: - Dymo 30252 (LabelWriter "Address"): 1⅛″ × 3½″ (28 × 89 mm), fed short edge first, so the
+#:   page is 3.5in wide by 1.125in tall.
+#: - 2¼″ × 1¼″ direct thermal (Dymo 30334 "Multipurpose", 57 × 32 mm; the same size is a
+#:   standard Zebra / Rollo / Brother roll).
+#:
+#: The QR: at least 0.8″ wherever the label allows it, and never under 0.6″. Measured 11-04 on
+#: phone-style photos, a 41-module label QR at 0.85″ reads from ~45 cm in a sharp photo and
+#: ~20 cm when blurry, and live video has far fewer pixels than a photo: below 0.6″ the modules
+#: get too small for the in-view decoder to read reliably at a hand's distance.
+QR_MIN_IN, QR_PREF_IN = 0.6, 0.8
+LABEL_STOCKS: dict[str, dict] = {
+    "avery5160": {
+        "name": "Avery 5160 / 8160 — 30 to a US Letter sheet (2⅝″ × 1″)",
+        "sheet": True,
+        **AVERY_5160,
+        "qr": 0.85,
+    },
+    "avery5163": {
+        "name": "Avery 5163 / 8163 — 10 to a US Letter sheet (4″ × 2″)",
+        "sheet": True,
+        "cols": 2,
+        "rows": 5,
+        "w": 4.0,
+        "h": 2.0,
+        "top": 0.5,
+        "side": 0.15625,
+        "pitch_x": 4.1875,
+        "pitch_y": 2.0,
+        "qr": 1.6,
+    },
+    "dymo30252": {
+        "name": "Dymo 30252 address roll — 3½″ × 1⅛″, one label at a time",
+        "sheet": False,
+        "w": 3.5,
+        "h": 1.125,
+        "qr": 0.95,
+    },
+    "roll225x125": {
+        "name": "2¼″ × 1¼″ thermal roll (Dymo 30334, Zebra, Rollo, Brother) — one at a time",
+        "sheet": False,
+        "w": 2.25,
+        "h": 1.25,
+        "qr": 1.05,
+    },
+}
+#: The bin sheet before 0.15.0 (big 2½″ squares, 12 to a Letter page) stays the bins' default.
+BIN_STOCKS = ("bins12", "avery5160", "avery5163", "dymo30252", "roll225x125")
+ITEM_STOCKS = ("avery5160", "avery5163", "dymo30252", "roll225x125")
+DEFAULT_STOCK = {"bins": "bins12", "items": "avery5160"}
+STOCK_NAMES = {"bins12": "Large bin labels — 12 to a US Letter sheet (2½″ squares)"} | {
+    k: v["name"] for k, v in LABEL_STOCKS.items()
+}
+
+
+def per_sheet(stock: str) -> int:
+    """How many labels one sheet (or, for a roll, one print) holds: what ``start_at`` counts."""
+    if stock == "bins12":
+        return 12
+    g = LABEL_STOCKS[stock]
+    return g["cols"] * g["rows"] if g["sheet"] else 1
+
+
+def stock_layout(stock: str) -> dict:
+    """The QR size and whether the text sits beside it or below it, checked against the rule."""
+    g = LABEL_STOCKS[stock]
+    pad = 0.06
+    beside = g["h"] - 2 * pad >= QR_PREF_IN and g["w"] - g["qr"] - 3 * pad >= 0.7
+    qr = min(g["qr"], g["h"] - 2 * pad) if beside else min(g["w"] - 2 * pad, g["h"] - 2 * pad - 0.3)
+    if qr < QR_MIN_IN:
+        raise ValueError(f"{stock}: a {qr:.2f}in QR is under the {QR_MIN_IN}in minimum")
+    return {"qr": round(qr, 4), "beside": beside, "pad": pad}
+
+
+def stocks_for(kind: str) -> list[dict]:
+    ids = BIN_STOCKS if kind == "bins" else ITEM_STOCKS
+    return [
+        {
+            "id": s,
+            "name": STOCK_NAMES[s],
+            "per_sheet": per_sheet(s),
+            "roll": s in LABEL_STOCKS and not LABEL_STOCKS[s]["sheet"],
+        }
+        for s in ids
+    ]
+
+
+def _stock_css(stock: str) -> str:
+    g, lay = LABEL_STOCKS[stock], stock_layout(stock)
+    page_w, page_h = (8.5, 11.0) if g["sheet"] else (g["w"], g["h"])
+    big = 1.0 if g["h"] >= 1.9 else 0.8 if g["h"] >= 1.1 else 0.62
+    return (
+        f"@page{{size:{page_w}in {page_h}in;margin:0}}"
+        "*{box-sizing:border-box}"
+        "html,body{margin:0;background:#fff;color:#000;font-family:Helvetica,Arial,sans-serif}"
+        ".bar{display:flex;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid #ccc;font-size:14px}"
+        ".bar button{font:inherit;padding:6px 14px;border:1px solid #000;background:#000;color:#fff;border-radius:4px;cursor:pointer}"
+        f".page{{position:relative;width:{page_w}in;height:{page_h}in;margin:0.25in auto;background:#fff;"
+        "box-shadow:0 0 0 1px #ddd;overflow:hidden;break-after:page}"
+        ".page:last-child{break-after:auto}"
+        f".label{{position:absolute;width:{g['w']}in;height:{g['h']}in;display:flex;"
+        f"flex-direction:{'row' if lay['beside'] else 'column'};align-items:center;gap:0.08in;"
+        f"padding:{lay['pad']}in 0.1in {lay['pad']}in 0.07in;overflow:hidden}}"
+        ".label.blank{visibility:hidden}"
+        f".qr{{flex:0 0 {lay['qr']}in;width:{lay['qr']}in;height:{lay['qr']}in}}"
+        ".txt{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:0.02in;line-height:1.15}"
+        f".name{{font-size:{13 if g['h'] >= 1.9 else 9 if g['h'] >= 1.1 else 8.5}pt;font-weight:700;display:-webkit-box;"
+        f"-webkit-line-clamp:{3 if g['h'] >= 1.9 else 2};-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}}"
+        f".bid{{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;font-size:{40 * big}pt;line-height:1}}"
+        f".meta{{font-size:{7.5 if big < 1 else 11}pt;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}"
+        f".iid{{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:{6.5 if big < 1 else 9}pt;"
+        "white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+        ".guide .label{outline:1px dashed #bbb;outline-offset:-1px}"
+        "@media print{.bar{display:none}.page{margin:0;box-shadow:none}.guide .label{outline:none}}"
+    )
+
+
+def stock_sheet_html(cells: list[str], stock: str, *, title: str, summary: str, start_at: int = 1) -> str:
+    """Lay ready-made label bodies (``cells``) out on ``stock``. ``start_at`` (sheets only) skips
+    used positions on the first sheet."""
+    g = LABEL_STOCKS[stock]
+    per = per_sheet(stock)
+    start = min(max(int(start_at or 1), 1), per)
+    slots: list[str | None] = [None] * (start - 1) + list(cells)
+    pages = []
+    for p in range(0, len(slots), per):
+        out = []
+        for k, cell in enumerate(slots[p : p + per]):
+            if g["sheet"]:
+                row, col = divmod(k, g["cols"])
+                left, top = g["side"] + col * g["pitch_x"], g["top"] + row * g["pitch_y"]
+            else:
+                left, top = 0.0, 0.0
+            pos = f'style="left:{left:.5f}in;top:{top:.5f}in"'  # 5 places: 5163's 5⁄32″ margin is 0.15625
+            out.append(
+                f'<div class="label blank" {pos}></div>' if cell is None else f'<div class="label" {pos}>{cell}</div>'
+            )
+        pages.append('<div class="page">' + "".join(out) + "</div>")
+    return (
+        f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{_E(title)}</title>'
+        f'<style>{_stock_css(stock)}</style></head><body class="guide">'
+        '<div class="bar"><button type="button" onclick="window.print()">Print</button>'
+        f"<span>{summary}</span></div>" + "".join(pages) + "</body></html>"
+    )
+
+
+def _item_cell(it: dict, base: str) -> str:
+    meta = " · ".join(x for x in (str(it.get("condition") or "").strip(), str(it.get("bin_id") or "").strip()) if x)
+    return (
+        qr_svg(item_label_url(base, it["id"]))
+        + '<div class="txt">'
+        + f'<div class="name">{_E(str(it.get("name") or ""))}</div>'
+        + (f'<div class="meta">{_E(meta)}</div>' if meta else "")
+        + f'<div class="iid">{_E(it["id"])}</div>'
+        + "</div>"
+    )
+
+
+def _bin_cell(b: dict, base: str) -> str:
+    return (
+        qr_svg(label_url(base, b["id"]))
+        + '<div class="txt">'
+        + f'<div class="bid">{_E(b["id"])}</div>'
+        + (f'<div class="meta">{_E(b.get("label") or "")}</div>' if b.get("label") else "")
+        + "</div>"
+    )
+
+
+def _how_many(count: int, stock: str, start: int) -> str:
+    per = per_sheet(stock)
+    if not LABEL_STOCKS[stock]["sheet"]:
+        return f"{count} label{'s' if count != 1 else ''}, one per label on {STOCK_NAMES[stock]}"
+    sheets = -(-(count + start - 1) // per)
+    skip = f" Starting at label {start} on the first sheet." if start > 1 else ""
+    return f"{count} label{'s' if count != 1 else ''} on {sheets} sheet{'s' if sheets != 1 else ''}: {STOCK_NAMES[stock]}.{skip}"
+
+
+def items_on_stock(items: list[dict], base: str, stock: str, *, start_at: int = 1) -> str:
+    """Item stickers on any stock but the bins' large squares."""
+    if stock == "avery5160":
+        return item_sheet_html(items, base, start_at=start_at)  # unchanged since 0.10.0
+    start = min(max(int(start_at or 1), 1), per_sheet(stock))
+    summary = (
+        _E(_how_many(len(items), stock, start))
+        + f" Print at 100% (Actual size), not Fit to page. Each opens its item at {_E(base)}{_E(ITEM_PATH)}&lt;item&gt;"
+    )
+    return stock_sheet_html(
+        [_item_cell(it, base) for it in items], stock, title="Item labels", summary=summary, start_at=start
+    )
+
+
+def bins_on_stock(bins: list[dict], base: str, stock: str, *, start_at: int = 1) -> str:
+    """Bin labels on any stock; ``bins12`` is the large-square sheet from 0.7.0."""
+    if stock == "bins12":
+        return sheet_html(bins, base)
+    start = min(max(int(start_at or 1), 1), per_sheet(stock))
+    summary = (
+        _E(_how_many(len(bins), stock, start))
+        + f" Print at 100% (Actual size), not Fit to page. Each opens its bin at {_E(base)}{_E(LABEL_PATH)}&lt;bin&gt;"
+    )
+    return stock_sheet_html(
+        [_bin_cell(b, base) for b in bins], stock, title="Bin labels", summary=summary, start_at=start
+    )

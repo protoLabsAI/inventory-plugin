@@ -1055,6 +1055,30 @@ PAGE = r"""<!doctype html>
     await refresh();
     return false;  // keep the dialog: its link is the fallback
   }
+  // ── label stock (0.15.0): Avery sheets or a thermal roll. The last pick per kind (bins, items)
+  // is remembered in this browser's localStorage, not in Settings: it's which printer is beside
+  // you, not how the agent behaves.
+  const STOCK_KEY = (kind) => "inventory.labelstock." + kind;
+  function lastStock(kind, info) {
+    const ok = ((info.stocks || {})[kind] || []).map((s) => s.id);
+    let v = ""; try { v = localStorage.getItem(STOCK_KEY(kind)) || ""; } catch (_) { v = ""; }
+    return ok.includes(v) ? v : (info.default_stock || {})[kind] || ok[0] || "";
+  }
+  function keepStock(kind, v) { try { localStorage.setItem(STOCK_KEY(kind), v); } catch (_) { /* this browser won't remember */ } }
+  const stockOf = (info, kind, id) => ((info.stocks || {})[kind] || []).find((s) => s.id === id) || { id, per_sheet: 1, roll: true };
+  const skips = (st) => !st.roll && st.per_sheet > 1 && st.id !== "bins12";
+  function stockField(kind, info) {
+    const list = (info.stocks || {})[kind] || [];
+    return list.length ? field("stock", "Label stock", lastStock(kind, info), { type: "select", span2: true, options: list.map((s) => [s.id, s.name]), hint: "A roll prints one label per page: pick your label printer and its label size in the print dialog." }) : "";
+  }
+  function startField(kind, info) {
+    const st = stockOf(info, kind, lastStock(kind, info));
+    return '<div id="start-wrap" class="span2"' + (skips(st) ? "" : " hidden") + ">" + field("start", "Start at label", 1, { type: "number", step: "1", hint: "On a partly used sheet, the first free label: 1 is top left, counting across. Only the first sheet skips." }) + "</div>";
+  }
+  function wireStock(kind, info) {
+    const sel = $("#f_stock"), wrap = $("#start-wrap"); if (!sel || !wrap) return;
+    sel.addEventListener("change", () => { wrap.hidden = !skips(stockOf(info, kind, sel.value)); });
+  }
   async function labelsDialog(only) {
     if (!state.bins.length) return toast("Make some bins first. Then print their labels.", "warning");
     let info;
@@ -1064,19 +1088,24 @@ PAGE = r"""<!doctype html>
     const unprinted = state.bins.filter((b) => !b.labels_printed_on).length;
     const where = '<div class="span2 muted">Each label opens ' + esc(info.base + info.path) + "&lt;bin&gt;." +
       (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + "</div>";
-    const body = only ? '<div class="span2">One label for bin ' + esc(only) + ".</div>" + where :
+    const body = (only ? '<div class="span2">One label for bin ' + esc(only) + ".</div>" :
       field("mode", "Which labels", unprinted ? "unprinted" : "all", { type: "select", options: [["unprinted", "Bins without a printed label (" + unprinted + ")"], ["range", "A range of bins"], ["all", "All bins (" + ids.length + ")"]] }) +
-      field("from", "From", ids[0], { type: "select", options: ids, hint: "Only used for a range." }) + field("to", "To", ids[ids.length - 1], { type: "select", options: ids }) + where;
-    await dialog({
+      field("from", "From", ids[0], { type: "select", options: ids, hint: "Only used for a range." }) + field("to", "To", ids[ids.length - 1], { type: "select", options: ids })) + stockField("bins", info) + startField("bins", info) + where;
+    const shown = dialog({
       title: only ? "Print the label for " + only : "Print bin labels", submit: "Open the sheet", body,
       onSubmit: async (v) => {
         const w = sheetTab();  // before any await: on the web a new tab needs the click itself
         const req = only ? { ids: [only] } : v.mode === "range" ? { from: v.from, to: v.to } : v.mode === "all" ? { all: true } : { unprinted: true };
+        const st = stockOf(info, "bins", v.stock || lastStock("bins", info));
+        if (v.stock) { req.stock = v.stock; keepStock("bins", v.stock); }
+        if (skips(st)) { const start = Math.round(Number(v.start || 1)); if (!(start >= 1 && start <= st.per_sheet)) { if (w) w.close(); toast("Start at a label from 1 to " + st.per_sheet, "warning"); return false; } req.start_at = start; }
         let r;
         try { r = await api("/labels/sheet", "POST", req); } catch (e) { if (w) w.close(); throw e; }
         return openSheet(w, r, r.ids.length);
       },
     });
+    wireStock("bins", info);
+    return shown;
   }
   // Item stickers on Avery 5160 (30 to a US Letter sheet). The sheet opens in the operator's
   // browser (see openSheet): this frame has no allow-modals, so printing from inside it does nothing.
@@ -1086,22 +1115,26 @@ PAGE = r"""<!doctype html>
     let info;
     try { info = await api("/labels/base"); } catch (e) { return toast(e.message, "error"); }
     if (!info.base) return toast(info.problem, "error");
-    const n = list.length, sheets = Math.ceil(n / 30);
-    const where = '<div class="span2 muted">' + n + " label" + (n === 1 ? "" : "s") + " on Avery 5160 (30 to a sheet). Each opens its item at " + esc(info.base) + "/plugins/inventory/i/&lt;item&gt;." +
+    const n = list.length;
+    const where = '<div class="span2 muted">' + n + " label" + (n === 1 ? "" : "s") + ". Each opens its item at " + esc(info.base) + "/plugins/inventory/i/&lt;item&gt;." +
       (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + " Print at 100% (Actual size), not Fit to page.</div>";
-    await dialog({
+    const shown = dialog({
       title: title || (n === 1 ? "Print a label for " + (itemById(list[0]).name || list[0]) : "Print " + n + " item labels"),
       submit: "Open the sheet",
-      body: field("start", "Start at label", 1, { type: "number", step: "1", hint: "On a partly used sheet, the first free label: 1 is top left, 30 is bottom right, counting across. Only the first sheet" + (sheets > 1 ? " of " + sheets : "") + " skips." }) + where,
+      body: stockField("items", info) + startField("items", info) + where,
       onSubmit: async (v) => {
-        const start = Math.round(Number(v.start || 1));
-        if (!(start >= 1 && start <= 30)) { toast("Start at a label from 1 to 30", "warning"); return false; }
+        const stock = v.stock || lastStock("items", info), st = stockOf(info, "items", stock);
+        const start = skips(st) ? Math.round(Number(v.start || 1)) : 1;
+        if (!(start >= 1 && start <= st.per_sheet)) { toast("Start at a label from 1 to " + st.per_sheet, "warning"); return false; }
         const w = sheetTab();  // before any await: on the web a new tab needs the click itself
+        keepStock("items", stock);
         let r;
-        try { r = await api("/labels/sheet", "POST", { items: list, start_at: start }); } catch (e) { if (w) w.close(); throw e; }
+        try { r = await api("/labels/sheet", "POST", { items: list, start_at: start, stock }); } catch (e) { if (w) w.close(); throw e; }
         return openSheet(w, r, r.ids.length);
       },
     });
+    wireStock("items", info);
+    return shown;
   }
   async function newBinsDialog() {
     const first = !state.bins.length;
