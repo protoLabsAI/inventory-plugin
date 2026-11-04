@@ -462,7 +462,7 @@ PAGE = r"""<!doctype html>
       ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="irow-sub">Not weighed yet.</span></div><button class="pl-btn pl-btn--sm tall" data-act="shipping" data-id="' + esc(it.id) + '">Weigh &amp; box</button></div>'
       : '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="cptext">' + esc(weightText(oz)) + '</span><span class="irow-sub">' + esc(packagingById(it.packaging_id) && packagingById(it.packaging_id).tare_oz ? "Includes " + packagingById(it.packaging_id).name + " (" + weightText(packagingById(it.packaging_id).tare_oz) + ")" : "As weighed") + '</span></div><span class="row-acts">' + cp("wlb", "Copy lb") + cp("woz", "Copy oz") + "</span></div>";
     const brow = it.box
-      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package size</span><span class="cptext">' + esc(boxText(it.box)) + '</span></div><span class="row-acts">' + cp("bl", "L") + cp("bw", "W") + cp("bh", "H") + "</span></div>"
+      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package size</span><span class="cptext">' + esc(boxText(it.box)) + '</span></div><span class="row-acts">' + cp("bl", "Copy L") + cp("bw", "Copy W") + cp("bh", "Copy H") + "</span></div>"
       : "";
     return wrow + brow;
   }
