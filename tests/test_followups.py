@@ -42,7 +42,7 @@ def _client(tmp_path, **cfg):
 
 def test_the_view_reads_the_setting_and_stale_defaults_to_it(tmp_path):
     c, reg = _client(tmp_path, stale_price_days=45)
-    assert c.get("/api/plugins/inventory/view-config").json() == {"stale_price_days": 45}
+    assert c.get("/api/plugins/inventory/view-config").json() == {"stale_price_days": 45, "aging_days": [45, 90, 120]}
     api = "/api/plugins/inventory"
     c.put(api + "/lots/L", json={"name": "L"})
     # Relative to today: a fixed date goes stale (or fresh) with the calendar (#17 review).

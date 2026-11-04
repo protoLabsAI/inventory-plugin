@@ -414,7 +414,7 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     # The page uploads the File itself as the body (kit.apiFetch passes a Blob through), its
     # type in Content-Type. Identification and pricing are agent turns this plugin starts
     # (scans.py); the page polls GET /scans/{id} while one is pending.
-    from .automations import stale_price_days
+    from .automations import aging_tiers, stale_price_days
     from .scans import confidence_threshold, scan_timeout, start_identify, start_pricing
 
     tmo = scan_timeout(cfg)
@@ -721,7 +721,20 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     @r.get("/view-config")
     async def _view_config() -> dict:
         """The operator settings the page needs to render the same way the agent reasons."""
-        return {"stale_price_days": stale_price_days(cfg)}
+        return {"stale_price_days": stale_price_days(cfg), "aging_days": list(aging_tiers(cfg))}
+
+    @r.get("/aging")
+    async def _aging() -> dict:
+        return store.aging(aging_tiers(cfg))
+
+    @r.post("/items/{item_id}/snooze")
+    async def _snooze(item_id: str, body: dict | None = None) -> dict:
+        try:
+            out = store.snooze_aging(item_id, days=(body or {}).get("days", 14), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "snoozed"})
+        return out
 
     @r.get("/audit")
     async def _audit(limit: int = Query(100, ge=1, le=2000), entity_id: str = "") -> dict:

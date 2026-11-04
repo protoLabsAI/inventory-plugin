@@ -38,6 +38,24 @@ def stale_price_days(cfg: dict) -> int:
     return min(365, max(1, v))
 
 
+AGING_DAYS_DEFAULT = (45, 90, 120)
+
+
+def aging_tiers(cfg: dict) -> tuple[int, int, int]:
+    """Days unsold before an item reaches each aging tier: offer or drop 10%, drop again or
+    bundle, then decide. From the flat settings ``aging_days_1/2/3`` (each 1..730); a tier set
+    out of order is sorted, and a missing or bad value falls back to its default."""
+    out = []
+    for key, default in zip(("aging_days_1", "aging_days_2", "aging_days_3"), AGING_DAYS_DEFAULT, strict=True):
+        raw = (cfg or {}).get(key)
+        try:
+            v = int(float(raw)) if raw not in (None, "") else default
+        except (TypeError, ValueError):
+            v = default
+        out.append(min(730, max(1, v)))
+    return tuple(sorted(out))
+
+
 def weekly_review_prompt(cfg: dict) -> str:
     return WEEKLY_REVIEW_PROMPT.format(
         listed_days=int(cfg.get("stale_listing_days") or 14),

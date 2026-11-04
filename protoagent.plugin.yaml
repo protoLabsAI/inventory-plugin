@@ -37,6 +37,11 @@ config:
   review_max_items: 15              # re-price at most this many items per run (eBay pacing)
   stale_listing_days: 14            # a live listing older than this is reported
   stale_price_days: 30              # price evidence older than this is stale: re-checked by the review, badged in the view
+  # ── Aging stock ── days an unsold item can sit (listed, or available and not listed) before Next
+  # suggests a move: offer to watchers or drop 10%, then drop again or bundle, then decide.
+  aging_days_1: 45
+  aging_days_2: 90
+  aging_days_3: 120
   # The address printed in bin-label QR codes, up to (not including) /plugins/inventory.
   # Blank = work it out: the agent's public URL (a fleet member's hub tenant path), else its console.
   label_base_url: ""
@@ -77,6 +82,9 @@ settings:
   - { key: scan_confidence_threshold, label: "Scan: sure enough at", type: number, description: "0 to 1. Below this, a scan asks you to pick from the agent's guesses or type the name instead of offering Looks right." }
   - { key: scan_timeout_minutes, label: "Scan: give up after (minutes)", type: number, description: "An identification that hasn't answered by then shows as failed, with Retry. Pricing gets three times as long." }
   - { key: stale_price_days, label: "Stale price (days)", type: number, description: "Price evidence older than this counts as stale: the weekly review re-checks it, and the view badges it and lists it under Housekeeping. 1 to 365." }
+  - { key: aging_days_1, label: "Aging: first nudge (days)", type: number, description: "After this many days unsold, Next suggests an offer to watchers or a 10% drop. 1 to 730." }
+  - { key: aging_days_2, label: "Aging: second nudge (days)", type: number, description: "After this many days, Next suggests another 10% drop or a bundle." }
+  - { key: aging_days_3, label: "Aging: decide (days)", type: number, description: "After this many days, Next asks you to decide: clearance, bundle, or pull it." }
 
 # Event bus (ADR 0039): the topics this plugin publishes.
 emits:

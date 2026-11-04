@@ -215,6 +215,8 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     # 0.12.0 — the Custom label (SKU) the operator last copied into eBay for this draft ('' = never),
     # so Next can ask them to update it there when the item moves to another bin.
     ("drafts", "sku_copied", ("ALTER TABLE drafts ADD COLUMN sku_copied TEXT NOT NULL DEFAULT ''",)),
+    # 0.14.0 — an aging item the operator put off deciding about, until this date ('' = not snoozed).
+    ("items", "aging_snoozed_until", ("ALTER TABLE items ADD COLUMN aging_snoozed_until TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -1524,6 +1526,98 @@ class InventoryStore:
             "stale_prices": stale_prices,
             "thresholds": {"listed_days": listed_days, "price_days": price_days},
         }
+
+    # ── aging stock ──────────────────────────────────────────────────────────────
+    #: Statuses that can sit unsold on a shelf or a marketplace. `pending` is a sale in progress
+    #: and `planned` is not split yet, so neither ages.
+    AGING_STATUSES = ("available", "listed")
+
+    def aging(self, tiers: tuple[int, int, int] = (45, 90, 120), *, today: str | None = None) -> dict:
+        """Unsold stock that has sat at least the first tier's days, oldest first.
+
+        Days count from the live listing's ``listed_on`` when there is one ("listed"). Without a
+        listing date they count from when the item last became listed/available in the audit
+        trail ("listed" / "not listed"), and failing that from when the item was added ("added").
+        Each row says which basis it used, so the operator knows how solid the number is.
+        Snoozed items are left out until their snooze ends."""
+        today = today or today_iso()
+        t0 = datetime.strptime(today[:10], "%Y-%m-%d").date()
+        tiers = tuple(sorted(int(t) for t in tiers))
+        rows: list[dict] = []
+        with self._read() as con:
+            items = con.execute(
+                f"SELECT * FROM items WHERE status IN ({','.join('?' * len(self.AGING_STATUSES))})",
+                self.AGING_STATUSES,
+            ).fetchall()
+            for r in items:
+                if (r["aging_snoozed_until"] or "") > today:
+                    continue
+                listing = con.execute(
+                    "SELECT channel, url, listed_on FROM listings WHERE item_id=? AND state='active' "
+                    "ORDER BY listed_on LIMIT 1",
+                    (r["id"],),
+                ).fetchone()
+                since, basis, channel, url = "", "", "", ""
+                if listing is not None:
+                    channel, url = listing["channel"], listing["url"]
+                    if listing["listed_on"]:
+                        since, basis = listing["listed_on"][:10], "listed"
+                if not since:
+                    became = con.execute(
+                        "SELECT ts FROM audit WHERE entity='item' AND entity_id=? AND action IN ('update','create') "
+                        "AND json_valid(changes) AND json_extract(changes, '$.status') = ? ORDER BY id DESC LIMIT 1",
+                        (r["id"], r["status"]),
+                    ).fetchone()
+                    if became is not None:
+                        since = became["ts"][:10]
+                        basis = "listed" if r["status"] == "listed" else "not listed"
+                if not since:
+                    since = (r["created_at"] or "")[:10]
+                    basis = "added"
+                try:
+                    days = (t0 - datetime.strptime(since, "%Y-%m-%d").date()).days
+                except ValueError:
+                    continue
+                tier = max((t for t in tiers if days >= t), default=0)
+                if not tier:
+                    continue
+                item = _item_row_to_dict(r)
+                rows.append(
+                    {
+                        "item_id": r["id"],
+                        "name": r["name"],
+                        "status": r["status"],
+                        "bin_id": r["bin_id"],
+                        "lot_id": r["lot_id"],
+                        "target": item.get("target"),
+                        "since": since,
+                        "days": days,
+                        "basis": basis,
+                        "channel": channel,
+                        "url": url,
+                        "tier": tier,
+                        "tier_index": tiers.index(tier),
+                    }
+                )
+        rows.sort(key=lambda x: (-x["days"], x["name"]))
+        return {"items": rows, "tiers": list(tiers), "as_of": today}
+
+    def snooze_aging(self, item_id: str, *, days: int = 14, actor: str = "") -> dict:
+        """Put off the aging decision on one item for ``days`` (1..90). Audited."""
+        try:
+            n = int(days)
+        except (TypeError, ValueError) as exc:
+            raise InventoryError(f"days must be a whole number, got {days!r}") from exc
+        if not 1 <= n <= 90:
+            raise InventoryError("snooze for 1 to 90 days")
+        until = (datetime.now(UTC) + timedelta(days=n)).strftime("%Y-%m-%d")
+        with self._tx() as con:
+            row = con.execute("SELECT id FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise InventoryError(f"no item {item_id!r}")
+            con.execute("UPDATE items SET aging_snoozed_until=?, updated_at=? WHERE id=?", (until, now_iso(), item_id))
+            self._audit(con, "item", item_id, "update", actor, {"aging_snoozed_until": until, "reason": "aging snooze"})
+        return {"item_id": item_id, "snoozed_until": until}
 
     # ── scans: photo intake ──────────────────────────────────────────────────────
     # A scan is a photo (up to MAX_SCAN_PHOTOS) the agent identifies in the background. A BOX

@@ -66,6 +66,9 @@ PAGE = r"""<!doctype html>
   .pop-form{display:grid;gap:var(--pl-space-2)}
   .col-num{width:1%}
   .rowact{flex:none;margin:0 var(--pl-space-1)}
+  .list li.aging{flex-wrap:wrap}
+  .aging-acts{display:flex;gap:var(--pl-space-2);flex:none;padding:0 var(--pl-space-1) var(--pl-space-1)}
+  @media (max-width:639px){.aging-acts{flex-basis:100%;justify-content:flex-end}.aging-acts > *{min-height:var(--pl-space-12)}}
   .bin-id{font-family:var(--pl-font-mono)}
   .note{margin-bottom:var(--pl-space-3)}
   .sr-only{position:absolute;width:var(--pl-border-width);height:var(--pl-border-width);overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -180,7 +183,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], aging: [], agingSel: new Set(), agingAll: false, scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -586,7 +589,7 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes, aging] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] })), api("/aging").catch(() => ({ items: [] }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
@@ -594,6 +597,8 @@ PAGE = r"""<!doctype html>
     state.drafts = Object.fromEntries((drafts.drafts || []).map((d) => [d.item_id, d])); state.maxBulk = drafts.max_bulk || 10;
     state.toEnd = (toEnd && toEnd.listings) || [];
     state.pastes = (pastes && pastes.pastes) || [];
+    state.aging = (aging && aging.items) || [];
+    for (const id of [...state.agingSel]) if (!state.aging.some((a) => a.item_id === id)) state.agingSel.delete(id);
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
@@ -667,6 +672,27 @@ PAGE = r"""<!doctype html>
       (safeUrl(l.url) ? '<a class="pl-btn pl-btn--sm" href="' + esc(safeUrl(l.url)) + '" target="_blank" rel="noopener">Open listing</a>' : "") +
       '</div><button class="pl-btn pl-btn--sm pl-btn--primary rowact" data-act="ended" data-id="' + esc(l.id) + '" aria-label="I ended the listing for ' + esc(l.item_name) + '">I ended it</button></li>').join("");
   }
+  // Aging stock: unsold items that have sat past a tier (Settings ▸ Aging). ONE suggested move per
+  // tier, and every action is the operator's: a markdown goes through the Price dialog with a
+  // stated basis, a bundle is drafted in chat for the agent to price, a snooze is recorded.
+  const AGING_MOVES = ["Send an offer to watchers, or drop 10%", "Drop another 10%, or bundle it", "Decide: clearance, bundle, or pull it"];
+  const agingSince = (a) => a.basis === "listed" ? "listed " + a.days + " days" + (a.channel ? " on " + a.channel : "")
+    : a.basis === "not listed" ? "available " + a.days + " days, not listed" : "added " + a.days + " days ago, no listing date";
+  function agingRows(xs) {
+    return xs.map((a) => '<li class="aging"><label class="hit pl-checkbox"><input type="checkbox" data-agesel="' + esc(a.item_id) + '"' + (state.agingSel.has(a.item_id) ? " checked" : "") + ' aria-label="Select ' + esc(a.name) + ' for a bundle"></label>' +
+      '<button class="irow" data-item="' + esc(a.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(a.name) + '</span><span class="irow-sub">' + esc(agingSince(a)) + '</span><span class="irow-sub">' + esc(AGING_MOVES[a.tier_index] || AGING_MOVES[2]) + '</span></span><span class="money">' + esc(whole(a.target)) + "</span></button>" +
+      '<span class="aging-acts"><button class="pl-btn pl-btn--sm" data-act="markdown" data-id="' + esc(a.item_id) + '"' + (a.target == null ? " disabled" : "") + '>Mark down…</button><button class="pl-btn pl-btn--ghost pl-btn--sm" data-act="snooze" data-id="' + esc(a.item_id) + '">Snooze 14 days</button></span></li>').join("");
+  }
+  function bundleText(xs) {
+    const head = "Please propose a bundle from these " + xs.length + " slow-moving items: which go together for a buyer, a bundle title, and a bundle price from eBay sold comps (with the basis). Don't change anything yet; I'll decide.\n";
+    let body = "";
+    for (const a of xs) {
+      const line = "- " + a.name + " (" + a.item_id + ")" + (a.target != null ? ", now " + whole(a.target) : "") + ", " + agingSince(a) + "\n";
+      if ((head + body + line).length > COMPOSE_MAX - 40) break;
+      body += line;
+    }
+    return head + body;
+  }
   function renderNext() {
     const items = state.items;
     let h = "";
@@ -686,6 +712,13 @@ PAGE = r"""<!doctype html>
     if (moved.length) h += sec("Update the custom label on eBay", moved.length, moved.slice(0, ROW_CAP).map((i) => '<li><button class="irow" data-item="' + esc(i.id) + '"><span class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">moved bins · now ' + esc(state.drafts[i.id].sku) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="skucopy" data-id="' + esc(i.id) + '">Copy</button><button class="pl-btn pl-btn--sm rowact" data-act="skudone" data-id="' + esc(i.id) + '">Done</button></li>').join(""), "");
     const stuck = items.filter((i) => i.status === "available" && state.drafts[i.id] && state.drafts[i.id].copied_stale);
     if (stuck.length) h += sec("Copied, not live yet", stuck.length, stuck.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, "copied " + String(state.drafts[i.id].copied_at).slice(0, 10) + " · did it go live?") + "</li>").join(""), "");
+    if (state.aging.length) {
+      const nsel = state.agingSel.size;
+      const bundle = composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="bundle"' + (nsel < 2 ? " disabled" : "") + ">" + (nsel < 2 ? "Bundle… (pick 2+)" : "Bundle " + nsel + "…") + "</button>" : "";
+      const cap = state.agingAll ? state.aging.length : ROW_CAP * 2;
+      const more = state.aging.length > ROW_CAP * 2 ? '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-act="agingall">' + (state.agingAll ? "Show fewer" : "Show all " + state.aging.length) + "</button>" : "";
+      h += sec("Aging stock", state.aging.length, agingRows(state.aging.slice(0, cap)), "", bundle + more);
+    }
     const ready = readyToList(items);
     const undrafted = ready.filter((i) => { const d = state.drafts[i.id]; return !d || d.state === "failed"; }).length;
     const bulk = undrafted ? '<button class="pl-btn pl-btn--sm" data-act="draftbulk">Draft ' + Math.min(undrafted, state.maxBulk) + "</button>" : "";
@@ -897,13 +930,14 @@ PAGE = r"""<!doctype html>
       onSubmit: async (v) => { await api("/lots/" + encodeURIComponent(v.id), "PUT", { name: v.name, acquisition_cost: num(v.acquisition_cost), acquired_on: v.acquired_on, source: v.source, notes: v.notes, description: l.description || "" }); toast("Lot saved", "success"); await refresh(); },
     });
   }
-  async function priceDialog(id) {
+  async function priceDialog(id, pre = {}) {
     const it = itemById(id); if (!it) return;
+    const tv = pre.target ?? it.target ?? "", bv = pre.basis ?? it.price_basis ?? "";
     await dialog({
       title: "Price · " + it.name, submit: "Set price",
-      body: field("low", "Low ($)", it.target_low ?? "", { type: "number", step: "0.01" }) + field("target", "Target ($)", it.target ?? "", { type: "number", step: "0.01" }) + field("high", "High ($)", it.target_high ?? "", { type: "number", step: "0.01" }) +
+      body: field("low", "Low ($)", it.target_low ?? "", { type: "number", step: "0.01" }) + field("target", "Target ($)", tv, { type: "number", step: "0.01" }) + field("high", "High ($)", it.target_high ?? "", { type: "number", step: "0.01" }) +
         field("observed_on", "As of", new Date().toISOString().slice(0, 10)) +
-        field("basis", "Basis (required)", it.price_basis || "", { required: true, span2: true, placeholder: "eBay sold comps (22 sold, incl. shipping) · retail anchor, no sold comps", hint: "What the numbers rest on. A bare number is not a target." }) +
+        field("basis", "Basis (required)", bv, { required: true, span2: true, placeholder: "eBay sold comps (22 sold, incl. shipping) · retail anchor, no sold comps", hint: "What the numbers rest on. A bare number is not a target." }) +
         '<div class="span2 pl-eyebrow">Evidence (optional — recorded as a price observation)</div>' +
         field("source", "Source", "", { type: "select", options: [["", "—"], "ebay_sold", "ebay_active", "amazon", "retail", "manual", "other"] }) + field("n", "Comps (n)", "", { type: "number", step: "1" }) +
         field("p25", "p25 ($)", "", { type: "number", step: "0.01" }) + field("median", "Median ($)", "", { type: "number", step: "0.01" }) + field("p75", "p75 ($)", "", { type: "number", step: "0.01" }) + field("query", "Query used", ""),
@@ -1864,6 +1898,13 @@ PAGE = r"""<!doctype html>
     "paste-record": () => recordPaste(), "paste-retry": () => retryPaste(), "paste-discard": () => discardPaste(),
     "paste-byhand": (id) => { closeDrawer(); return soldDialog(id); }, "paste-drop": (i) => dropPasteLine(Number(i)),
     "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),
+    markdown: (id) => {
+      const a = state.aging.find((x) => x.item_id === id), it = itemById(id); if (!a || !it || it.target == null) return;
+      return priceDialog(id, { target: Math.round(it.target * 90) / 100, basis: "Aging markdown, " + a.days + " days, no sale (was " + whole(it.target) + ")" });
+    },
+    snooze: async (id) => { try { await api("/items/" + encodeURIComponent(id) + "/snooze", "POST", { days: 14 }); } catch (e) { return toast(e.message, "error"); } state.agingSel.delete(id); toast("Snoozed for 14 days", "success"); await refresh(); },
+    agingall: () => { state.agingAll = !state.agingAll; render(); },
+    bundle: () => { const xs = state.aging.filter((a) => state.agingSel.has(a.item_id)); if (xs.length < 2) return; composeToChat(bundleText(xs)); },
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
   Object.assign(ACTS, SCAN_ACTS, PA_ACTS);
@@ -1903,6 +1944,7 @@ PAGE = r"""<!doctype html>
     });
     document.addEventListener("change", (e) => {
       const t = e.target;
+      if (t.dataset.agesel) { if (t.checked) state.agingSel.add(t.dataset.agesel); else state.agingSel.delete(t.dataset.agesel); return render(); }
       if (t.dataset.sel) { if (t.checked) state.selected.add(t.dataset.sel); else state.selected.delete(t.dataset.sel); return renderResults(); }
       if (t.id === "sel-all") { for (const it of stockItems(state.items, stockFilter())) { if (t.checked) state.selected.add(it.id); else state.selected.delete(it.id); } return renderResults(); }
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
