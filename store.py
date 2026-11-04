@@ -179,6 +179,16 @@ CREATE TABLE IF NOT EXISTS sale_pastes (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS packaging (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  length_tenths INTEGER,
+  width_tenths INTEGER,
+  height_tenths INTEGER,
+  tare_oz INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -217,6 +227,23 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     ("drafts", "sku_copied", ("ALTER TABLE drafts ADD COLUMN sku_copied TEXT NOT NULL DEFAULT ''",)),
     # 0.14.0 — an aging item the operator put off deciding about, until this date ('' = not snoozed).
     ("items", "aging_snoozed_until", ("ALTER TABLE items ADD COLUMN aging_snoozed_until TEXT NOT NULL DEFAULT ''",)),
+    # 0.15.0 — how it ships. Weight in whole ounces (NULL = not weighed: never guessed), the box
+    # in tenths of an inch (NULL = not measured), and the packaging preset it goes out in.
+    ("items", "weight_oz", ("ALTER TABLE items ADD COLUMN weight_oz INTEGER",)),
+    (
+        "items",
+        "box_l_tenths",
+        (
+            "ALTER TABLE items ADD COLUMN box_l_tenths INTEGER",
+            "ALTER TABLE items ADD COLUMN box_w_tenths INTEGER",
+            "ALTER TABLE items ADD COLUMN box_h_tenths INTEGER",
+        ),
+    ),
+    ("items", "packaging_id", ("ALTER TABLE items ADD COLUMN packaging_id TEXT NOT NULL DEFAULT ''",)),
+    # 0.15.0 — a bin check didn't find this item where it was recorded ('' = not missing).
+    ("items", "missing_since", ("ALTER TABLE items ADD COLUMN missing_since TEXT NOT NULL DEFAULT ''",)),
+    # 0.15.0 — when a bin was last checked against its labels ('' = never).
+    ("bins", "checked_on", ("ALTER TABLE bins ADD COLUMN checked_on TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -574,9 +601,84 @@ def _item_row_to_dict(r: sqlite3.Row) -> dict:
         "price_updated_on": d["price_updated_on"],
         "bin_id": d.get("bin_id") or "",
         "labels_printed_on": d.get("labels_printed_on") or "",
+        "weight_oz": d.get("weight_oz"),
+        "box": _box_dict(d),
+        "packaging_id": d.get("packaging_id") or "",
+        "missing_since": d.get("missing_since") or "",
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
+
+
+def _box_dict(d: dict) -> dict | None:
+    """The box an item ships in, in inches, or None until all three sides are measured."""
+    sides = [d.get(f"box_{k}_tenths") for k in ("l", "w", "h")]
+    if any(v is None for v in sides):
+        return None
+    return {"length": sides[0] / 10, "width": sides[1] / 10, "height": sides[2] / 10}
+
+
+def _packaging_row_to_dict(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    sides = [d.pop(f"{k}_tenths") for k in ("length", "width", "height")]
+    d["box"] = (
+        None
+        if any(v is None for v in sides)
+        else {"length": sides[0] / 10, "width": sides[1] / 10, "height": sides[2] / 10}
+    )
+    return d
+
+
+#: Carrier ceilings, so a typo (1400 lb, a 9-foot box) is refused instead of stored. 150 lb is
+#: eBay's calculated-shipping maximum; 108 in is the USPS maximum length. Anything heavier or
+#: bigger is freight, not a parcel.
+MAX_WEIGHT_OZ = 150 * 16
+MAX_SIDE_IN = 108
+
+
+def weight_ounces(lb=None, oz=None, *, total_oz=None) -> int | None:
+    """A weight in whole ounces from pounds + ounces (either may be blank) or a total in ounces.
+    Partial ounces round UP, the way carriers bill. All blank = None (not weighed); zero or less
+    is refused: an item is never weightless, so 0 would be a guess."""
+
+    def num(name, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError) as exc:
+            raise InventoryError(f"{name} must be a number, got {v!r}") from exc
+        if not math.isfinite(f) or f < 0:
+            raise InventoryError(f"{name} can't be negative")
+        return f
+
+    t = num("weight", total_oz)
+    if t is None:
+        p, o = num("pounds", lb), num("ounces", oz)
+        if p is None and o is None:
+            return None
+        t = (p or 0) * 16 + (o or 0)
+    ounces = math.ceil(round(t, 6))
+    if ounces <= 0:
+        raise InventoryError("a weight must be more than 0 oz; leave it blank if it isn't weighed yet")
+    if ounces > MAX_WEIGHT_OZ:
+        raise InventoryError(f"that's over {MAX_WEIGHT_OZ // 16} lb, more than a parcel can be; check the number")
+    return ounces
+
+
+def side_tenths(name: str, v) -> int | None:
+    """One box side in tenths of an inch (one decimal kept, rounded half up). Blank = None."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        d = Decimal(str(v).strip())
+    except Exception as exc:  # noqa: BLE001 — InvalidOperation and friends
+        raise InventoryError(f"{name} must be a number of inches, got {v!r}") from exc
+    if not d.is_finite() or d <= 0:
+        raise InventoryError(f"{name} must be more than 0 inches")
+    if d > MAX_SIDE_IN:
+        raise InventoryError(f"{name} is over {MAX_SIDE_IN} in, bigger than a parcel can be; check the number")
+    return int((d * 10).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def _lot_row_to_dict(r: sqlite3.Row) -> dict:
@@ -934,6 +1036,141 @@ class InventoryStore:
     def delete_item(self, item_id: str, *, actor: str = "") -> int:
         with self._tx() as con:
             return self._delete_item_rows(con, item_id, actor)
+
+    # ── shipping: packed weight, box and packaging (0.15.0) ─────────────────────
+    def list_packaging(self) -> list[dict]:
+        """The operator's packaging presets (box or mailer sizes with their own weight), by name.
+        Seeded EMPTY: the plugin never invents a box size."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT p.*, (SELECT COUNT(*) FROM items i WHERE i.packaging_id = p.id) AS items "
+                "FROM packaging p ORDER BY lower(p.name), p.id"
+            ).fetchall()
+        return [_packaging_row_to_dict(r) for r in rows]
+
+    def upsert_packaging(self, data: dict, *, actor: str = "") -> dict:
+        """Create (no ``id``) or update a preset: ``name``, ``length``/``width``/``height`` in
+        inches (all three, or none), ``tare_oz`` its own weight in ounces (blank = 0)."""
+        data = data or {}
+        pid = str(data.get("id") or "").strip()
+        name = " ".join(str(data.get("name") or "").split())[:80]
+        sides = [side_tenths(k, data.get(k)) for k in ("length", "width", "height")]
+        if any(v is None for v in sides) and not all(v is None for v in sides):
+            raise InventoryError("give all three sides of the box, or none")
+        tare = data.get("tare_oz")
+        tare_oz = 0 if tare is None or (isinstance(tare, str) and not tare.strip()) else weight_ounces(total_oz=tare)
+        ts = now_iso()
+        with self._tx() as con:
+            if pid:
+                row = con.execute("SELECT * FROM packaging WHERE id=?", (pid,)).fetchone()
+                if row is None:
+                    raise InventoryError(f"no packaging {pid!r}")
+                fields = {
+                    "name": name or row["name"],
+                    "length_tenths": sides[0],
+                    "width_tenths": sides[1],
+                    "height_tenths": sides[2],
+                    "tare_oz": tare_oz,
+                }
+                con.execute(
+                    "UPDATE packaging SET name=?, length_tenths=?, width_tenths=?, height_tenths=?, tare_oz=?, "
+                    "updated_at=? WHERE id=?",
+                    [*fields.values(), ts, pid],
+                )
+                self._audit(con, "packaging", pid, "update", actor, fields)
+            else:
+                if not name:
+                    raise InventoryError("name the packaging, e.g. “Small flat rate box” or “6×9 bubble mailer”")
+                pid = "PK-" + uuid.uuid4().hex[:6].upper()
+                con.execute(
+                    "INSERT INTO packaging(id, name, length_tenths, width_tenths, height_tenths, tare_oz, created_at, "
+                    "updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (pid, name, *sides, tare_oz, ts, ts),
+                )
+                self._audit(
+                    con,
+                    "packaging",
+                    pid,
+                    "create",
+                    actor,
+                    {"name": name, "sides_tenths": sides, "tare_oz": tare_oz},
+                )
+            row = con.execute(
+                "SELECT p.*, (SELECT COUNT(*) FROM items i WHERE i.packaging_id = p.id) AS items FROM packaging p "
+                "WHERE p.id=?",
+                (pid,),
+            ).fetchone()
+        return _packaging_row_to_dict(row)
+
+    def delete_packaging(self, packaging_id: str, *, actor: str = "") -> int:
+        """Remove a preset nothing uses. One that items ship in is refused: change them first."""
+        with self._tx() as con:
+            row = con.execute("SELECT * FROM packaging WHERE id=?", (packaging_id,)).fetchone()
+            if row is None:
+                return 0
+            n = con.execute("SELECT COUNT(*) FROM items WHERE packaging_id=?", (packaging_id,)).fetchone()[0]
+            if n:
+                raise InventoryError(f"{n} item(s) ship in {row['name']}; pick other packaging for them first")
+            con.execute("DELETE FROM packaging WHERE id=?", (packaging_id,))
+            self._audit(con, "packaging", packaging_id, "delete", actor, {"snapshot": dict(row)})
+            return 1
+
+    def set_shipping(self, item_id: str, data: dict, *, actor: str = "") -> dict:
+        """Record how an item ships. Keys present are changed, keys absent are kept:
+
+        - ``weight_lb`` + ``weight_oz`` (either may be blank), or ``weight_total_oz``; ``null``
+          for all of them clears the weight. Partial ounces round up.
+        - ``length``, ``width``, ``height`` in inches (all three, or ``null`` for all to clear).
+        - ``packaging_id``: a preset ('' or null = none). Picking one copies its box into the
+          item's box unless the same call gives the sides itself.
+
+        The weight is what the operator weighed: the item alone when packaging is picked (the
+        preset's own weight is added for the packed weight), else the item as it ships. Never
+        guessed. One audited transaction."""
+        data = data or {}
+        fields: dict = {}
+        if any(k in data for k in ("weight_lb", "weight_oz", "weight_total_oz")):
+            fields["weight_oz"] = weight_ounces(
+                data.get("weight_lb"), data.get("weight_oz"), total_oz=data.get("weight_total_oz")
+            )
+        sides_given = any(k in data for k in ("length", "width", "height"))
+        if sides_given:
+            sides = [side_tenths(k, data.get(k)) for k in ("length", "width", "height")]
+            if any(v is None for v in sides) and not all(v is None for v in sides):
+                raise InventoryError("give all three sides of the box, or none")
+            fields.update(zip(("box_l_tenths", "box_w_tenths", "box_h_tenths"), sides, strict=True))
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if item is None:
+                raise InventoryError(f"no item {item_id!r}")
+            if "packaging_id" in data:
+                pid = str(data.get("packaging_id") or "").strip()
+                if pid:
+                    pk = con.execute("SELECT * FROM packaging WHERE id=?", (pid,)).fetchone()
+                    if pk is None:
+                        raise InventoryError(f"no packaging {pid!r}")
+                    if not sides_given and pk["length_tenths"] is not None:
+                        fields.update(
+                            box_l_tenths=pk["length_tenths"],
+                            box_w_tenths=pk["width_tenths"],
+                            box_h_tenths=pk["height_tenths"],
+                        )
+                fields["packaging_id"] = pid
+            changed = {k: v for k, v in fields.items() if item[k] != v}
+            if changed:
+                sets = ", ".join(f"{k}=?" for k in changed)
+                con.execute(
+                    f"UPDATE items SET {sets}, updated_at=? WHERE id=?", [*changed.values(), now_iso(), item_id]
+                )
+                self._audit(con, "item", item_id, "shipping", actor, changed)
+            row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        return _item_row_to_dict(row)
+
+    def packed_weight_oz(self, item: dict, packaging: dict | None = None) -> int | None:
+        """What the parcel weighs: the item's weight plus its packaging's own weight."""
+        if item.get("weight_oz") is None:
+            return None
+        return int(item["weight_oz"]) + int((packaging or {}).get("tare_oz") or 0)
 
     # ── pricing ───────────────────────────────────────────────────────────────
     @staticmethod

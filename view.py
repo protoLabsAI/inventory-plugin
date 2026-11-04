@@ -183,7 +183,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], aging: [], agingSel: new Set(), agingAll: false, scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], aging: [], agingSel: new Set(), agingAll: false, scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, packaging: [], selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -245,6 +245,15 @@ PAGE = r"""<!doctype html>
   const daysOld = (d, now = Date.now()) => { if (!d) return Infinity; const t = Date.parse(d.length === 7 ? d + "-01" : d); return Number.isNaN(t) ? Infinity : (now - t) / 864e5; };
   const isStale = (i, now) => UNSOLD.includes(i.status) && i.target != null && daysOld(i.price_updated_on, now) > STALE_DAYS;
   const readyToList = (items) => items.filter((i) => i.status === "available" && i.target != null);
+  // ── shipping (0.15.0): the weight is whole ounces as weighed; the packaging's own weight is
+  // added for the packed weight. eBay asks for pounds + ounces and inches, so that's the format.
+  const lbOz = (oz) => ({ lb: Math.floor(oz / 16), oz: oz % 16 });
+  const weightText = (oz) => { if (oz == null) return ""; const w = lbOz(oz); return (w.lb ? w.lb + " lb" : "") + (w.lb && w.oz ? " " : "") + (w.oz || !w.lb ? w.oz + " oz" : ""); };
+  const inch = (v) => String(Math.round(Number(v) * 10) / 10);
+  const boxText = (b) => (b ? inch(b.length) + " × " + inch(b.width) + " × " + inch(b.height) + " in" : "");
+  const packagingById = (id) => (id ? state.packaging.find((p) => p.id === id) : null) || null;
+  const packedOz = (i) => (i.weight_oz == null ? null : i.weight_oz + ((packagingById(i.packaging_id) || {}).tare_oz || 0));
+  const noWeight = (i) => ["available", "listed", "pending"].includes(i.status) && i.weight_oz == null;
   function stockItems(items, f, now) {
     const seg = LIFECYCLE.find(([k]) => k === f.seg) || LIFECYCLE[0];
     const q = clean(f.q).toLowerCase();
@@ -252,6 +261,7 @@ PAGE = r"""<!doctype html>
       if (f.preset === "ready" && !(i.status === "available" && i.target != null)) return false;
       if (f.preset === "stale" && !isStale(i, now)) return false;
       if (f.preset === "nobin" && !(UNSOLD.includes(i.status) && !i.bin_id)) return false;
+      if (f.preset === "noweight" && !noWeight(i)) return false;
       if (!f.preset && seg[2] && !seg[2].includes(i.status)) return false;
       if (f.system && clean(i.system) !== f.system) return false;
       if (f.lot && i.lot_id !== f.lot) return false;
@@ -443,6 +453,18 @@ PAGE = r"""<!doctype html>
   const draftLabel = (d) => (!d || d.listing_state === "none" ? "no draft yet" : (LSTATE[d.listing_state] || [d.listing_state])[0]);
   const draftable = (it) => ["planned", "available"].includes(it.status);
   const cpRow = (k, label, text, extra = "") => '<div class="cprow"><div class="irow-main"><span class="pl-field__label">' + esc(label) + '</span><span class="cptext' + (k === "description" ? " pre" : "") + '">' + esc(text) + "</span>" + extra + '</div><button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="' + k + '">Copy ' + esc(label.toLowerCase()) + "</button></div>";
+  // eBay's package fields: weight as pounds + ounces, size as length × width × height in inches.
+  // Copied one number at a time, the way eBay's form takes them. Nothing here is guessed.
+  function shipRows(it) {
+    const oz = packedOz(it), cp = (k, label) => '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="' + k + '">' + esc(label) + "</button>";
+    const wrow = oz == null
+      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="irow-sub">Not weighed yet.</span></div><button class="pl-btn pl-btn--sm tall" data-act="shipping" data-id="' + esc(it.id) + '">Weigh &amp; box</button></div>'
+      : '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="cptext">' + esc(weightText(oz)) + '</span><span class="irow-sub">' + esc(packagingById(it.packaging_id) && packagingById(it.packaging_id).tare_oz ? "Includes " + packagingById(it.packaging_id).name + " (" + weightText(packagingById(it.packaging_id).tare_oz) + ")" : "As weighed") + '</span></div><span class="row-acts">' + cp("wlb", "Copy lb") + cp("woz", "Copy oz") + "</span></div>";
+    const brow = it.box
+      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package size</span><span class="cptext">' + esc(boxText(it.box)) + '</span></div><span class="row-acts">' + cp("bl", "L") + cp("bw", "W") + cp("bh", "H") + "</span></div>"
+      : "";
+    return wrow + brow;
+  }
   function draftBody(it, d) {
     // Kept, withdrawn or sold stock gets no new draft; a live one still shows its listing.
     if (!draftable(it) && !(d && d.state === "live")) return "";
@@ -460,6 +482,7 @@ PAGE = r"""<!doctype html>
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Price</span><span class="money">' + esc(fmt(it.target)) + '</span><span class="irow-sub">' + esc(it.price_basis ? "Basis: " + clip(it.price_basis, 140) : "No basis recorded") + '</span><span class="irow-sub">Change it with Set price.</span></div>' + '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="price">Copy price</button></div>' +
       cpRow("description", "Description", d.description) +
       cpRow("sku", "Custom label (SKU)", d.sku, '<span class="irow-sub">Bin first, so eBay\'s pick list says where it lives. Paste it into Custom label.</span>') +
+      shipRows(it) +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Photos</span><span class="irow-sub">' + (nPhotos ? nPhotos + " photo" + (nPhotos === 1 ? "" : "s") + ", metadata stripped, cover first" : "No photos from a scan") + "</span></div>" + (nPhotos ? '<button class="pl-btn pl-btn--sm tall" data-act="dphotos" data-id="' + esc(it.id) + '">Download photos</button>' : "") + "</div>" +
       (d.notes ? '<p class="basis notes muted">' + esc(d.notes) + "</p>" : "") +
       '<div class="drow gap-t">' + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="dlive" data-id="' + esc(it.id) + '">I listed it</button>' + ask("Regenerate", "redraft") + "</div>" +
@@ -488,6 +511,13 @@ PAGE = r"""<!doctype html>
   async function copyDraft(btn) {
     const d = state.openDraft; const it = d && state.items.find((i) => i.id === d.item_id); if (!d || !it) return;
     const k = btn.dataset.k;
+    const SHIP = { wlb: () => String(lbOz(packedOz(it)).lb), woz: () => String(lbOz(packedOz(it)).oz), bl: () => inch(it.box.length), bw: () => inch(it.box.width), bh: () => inch(it.box.height) };
+    if (SHIP[k]) {  // a package number: copy it, the draft's state doesn't change
+      if ((k[0] === "w" && packedOz(it) == null) || (k[0] === "b" && !it.box)) return;
+      if (!(await copyText(SHIP[k]()))) return toast("Couldn't copy here. Select the text and copy it.", "warning");
+      const was = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { if (btn.isConnected) btn.textContent = was; }, 2000);
+      return;
+    }
     const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : k === "sku" ? d.sku : d.description;
     const ok = await copyText(text);
     if (!ok) return toast("Couldn't copy here. Select the text and copy it.", "warning");
@@ -524,6 +554,13 @@ PAGE = r"""<!doctype html>
     if (ok) await refresh();
   }
 
+  function shipSummary(it) {
+    const pk = packagingById(it.packaging_id), parts = [];
+    if (it.weight_oz != null) parts.push(weightText(packedOz(it)) + (pk && pk.tare_oz ? " packed" : ""));
+    if (it.box) parts.push(boxText(it.box));
+    if (pk) parts.push(pk.name);
+    return parts.length ? "<span>" + esc(parts.join(" · ")) + "</span>" : '<span class="muted">Not weighed</span>';
+  }
   function itemBody(it, audit, draft = null) {
     const live = (it.listings || []).filter((l) => l.state === "active" || l.state === "needs_end");
     const obs = (it.observations || [])[0];
@@ -547,6 +584,7 @@ PAGE = r"""<!doctype html>
       kv("Label", (it.labels_printed_on ? '<span>Printed ' + esc(it.labels_printed_on) + "</span>" : '<span class="muted">Never printed</span>') +
         ' <button class="pl-btn pl-btn--sm" data-act="itemlabel" data-id="' + esc(it.id) + '">Print label</button>' +
         (UNSOLD.includes(it.status) ? ' <button class="pl-btn pl-btn--sm" data-act="pa-add" data-id="' + esc(it.id) + '">' + (PA.ids.includes(it.id) ? "In put away" : "Add to put away") + "</button>" : "")) +
+      kv("Shipping", shipSummary(it) + ' <button class="pl-btn pl-btn--sm" data-act="shipping" data-id="' + esc(it.id) + '">' + (it.weight_oz == null && !it.box ? "Weigh &amp; box" : "Edit") + "</button>") +
       kv("System", esc(it.system) || '<span class="muted">—</span>') +
       kv("Condition", esc(it.condition) || '<span class="muted">—</span>') +
       kv("Category", esc(it.category) || '<span class="muted">—</span>') +
@@ -602,7 +640,7 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes, aging] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] })), api("/aging").catch(() => ({ items: [] }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes, aging, packaging] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] })), api("/aging").catch(() => ({ items: [] })), api("/packaging").catch(() => ({ packaging: [] }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
@@ -611,6 +649,7 @@ PAGE = r"""<!doctype html>
     state.toEnd = (toEnd && toEnd.listings) || [];
     state.pastes = (pastes && pastes.pastes) || [];
     state.aging = (aging && aging.items) || [];
+    state.packaging = (packaging && packaging.packaging) || [];
     for (const id of [...state.agingSel]) if (!state.aging.some((a) => a.item_id === id)) state.agingSel.delete(id);
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
@@ -756,6 +795,8 @@ PAGE = r"""<!doctype html>
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
+    const unweighed = items.filter(noWeight).length;
+    if (unweighed) chores.push('<li><button class="irow" data-see="noweight"><span class="irow-main">' + unweighed + " for-sale item" + (unweighed === 1 ? " has" : "s have") + ' no packed weight</span><span class="muted">Weigh them</span></button></li>');
     if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
     return h.indexOf('class="sec"') >= 0 ? h : h + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
@@ -765,6 +806,7 @@ PAGE = r"""<!doctype html>
     if (f.preset === "ready") chips.push(["preset", "Ready to list"]);
     if (f.preset === "stale") chips.push(["preset", "Stale price"]);
     if (f.preset === "nobin") chips.push(["preset", "Not in a bin"]);
+    if (f.preset === "noweight") chips.push(["preset", "No packed weight"]);
     if (f.bin) chips.push(["bin", f.bin === "-" ? "No bin" : "Bin " + binText(f.bin)]);
     if (f.system) chips.push(["system", f.system]);
     if (f.lot) chips.push(["lot", lotName(f.lot)]);
@@ -1097,6 +1139,68 @@ PAGE = r"""<!doctype html>
         await refresh();
       },
     });
+  }
+  // ── shipping + packaging dialogs (0.15.0) ─────────────────────────────────────────────
+  const pkLabel = (p) => p.name + (p.box ? " — " + boxText(p.box) : "") + (p.tare_oz ? ", " + weightText(p.tare_oz) : "");
+  async function shippingDialog(id) {
+    const it = itemById(id); if (!it) return;
+    const w = it.weight_oz == null ? null : lbOz(it.weight_oz), b = it.box || {};
+    const opts = [["", "None: weigh it as it ships"]].concat(state.packaging.map((p) => [p.id, pkLabel(p)]));
+    const shown = dialog({
+      title: "Shipping: " + it.name, submit: "Save",
+      body: field("pk", "Packaging", it.packaging_id || "", { type: "select", options: opts, span2: true, hint: state.packaging.length ? "Its box fills in below, and its own weight is added for the packed weight." : "No packaging saved yet. Add your boxes and mailers from More ▸ Packaging." }) +
+        field("lb", "Weight: lb", w ? w.lb : "", { type: "number", step: "1", inputmode: "numeric" }) + field("oz", "oz", w ? w.oz : "", { type: "number", step: "0.1", inputmode: "decimal", hint: "With packaging picked, weigh the item alone. Partial ounces round up." }) +
+        field("l", "Length (in)", b.length ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("w", "Width (in)", b.width ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        field("h", "Height (in)", b.height ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        '<div class="span2 muted">Leave anything you haven\'t measured blank: nothing here is guessed.</div>',
+      onSubmit: async (v) => {
+        const body = { packaging_id: v.pk || "" };
+        const wBlank = !String(v.lb).trim() && !String(v.oz).trim();
+        if (!wBlank) Object.assign(body, { weight_lb: v.lb, weight_oz: v.oz });
+        else if (it.weight_oz != null) body.weight_total_oz = null;
+        const sides = [v.l, v.w, v.h].map((x) => String(x).trim());
+        if (sides.some(Boolean)) Object.assign(body, { length: sides[0], width: sides[1], height: sides[2] });
+        else if (!v.pk && it.box) Object.assign(body, { length: null, width: null, height: null });
+        await api("/items/" + encodeURIComponent(id) + "/shipping", "PUT", body);
+        toast("Shipping saved", "success"); await refresh();
+        if (state.drawer && state.drawer.kind === "putaway") paPaint();
+      },
+    });
+    const sel = $("#f_pk");
+    if (sel) sel.addEventListener("change", () => {
+      const pk = packagingById(sel.value); if (!pk || !pk.box) return;
+      [["l", "length"], ["w", "width"], ["h", "height"]].forEach(([f, k]) => { const el = $("#f_" + f); if (el) el.value = inch(pk.box[k]); });
+    });
+    return shown;
+  }
+  async function packagingDialog() {
+    const rows = state.packaging.map((p) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(p.name) + '</span><span class="irow-sub">' + esc([p.box ? boxText(p.box) : "no size", p.tare_oz ? weightText(p.tare_oz) + " empty" : "", p.items ? p.items + " item" + (p.items === 1 ? "" : "s") : ""].filter(Boolean).join(" · ")) + '</span></div><button type="button" class="pl-btn pl-btn--sm" data-act="pk-edit" data-id="' + esc(p.id) + '">Edit</button>' + (p.items ? "" : '<button type="button" class="pl-btn pl-btn--sm pl-btn--ghost" data-act="pk-del" data-id="' + esc(p.id) + '">Delete</button>') + "</li>").join("");
+    await dialog({
+      title: "Packaging",
+      body: '<div class="span2">' + (rows ? '<ul class="list">' + rows + "</ul>" : '<p class="muted">No packaging yet. Add the boxes and mailers you actually ship in, with their size and empty weight.</p>') + "</div>" +
+        '<div class="span2 drow"><button type="button" class="pl-btn pl-btn--primary" data-act="pk-new">Add packaging</button></div>',
+    });
+  }
+  async function pkEditDialog(id) {
+    const pk = id ? packagingById(id) : null, b = (pk && pk.box) || {};
+    await dialog({
+      title: pk ? "Edit " + pk.name : "Add packaging", submit: pk ? "Save" : "Add",
+      body: field("name", "Name", pk ? pk.name : "", { required: true, span2: true, placeholder: "Small flat rate box, 6×9 bubble mailer…" }) +
+        field("l", "Length (in)", b.length ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("w", "Width (in)", b.width ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        field("h", "Height (in)", b.height ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("tare", "Empty weight (oz)", pk ? pk.tare_oz : "", { type: "number", step: "0.1", inputmode: "decimal", hint: "Weigh it empty, with its padding. Blank = 0." }),
+      onSubmit: async (v) => {
+        const body = { name: v.name, length: v.l, width: v.w, height: v.h, tare_oz: v.tare };
+        if (pk) await api("/packaging/" + encodeURIComponent(pk.id), "PUT", body); else await api("/packaging", "POST", body);
+        toast(pk ? "Saved" : "Packaging added", "success"); await refresh();
+        setTimeout(packagingDialog, 0);
+      },
+    });
+  }
+  async function pkDelete(id) {
+    const pk = packagingById(id); if (!pk) return;
+    if (!(await confirm("Delete " + pk.name + "?", "Items keep their weight and box; nothing ships in it any more.", "Delete"))) return packagingDialog();
+    try { await api("/packaging/" + encodeURIComponent(id), "DELETE"); toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); }
+    await refresh(); packagingDialog();
   }
   function startMove(id) {
     state.moveTo = id; state.selected.clear();
@@ -1833,8 +1937,8 @@ PAGE = r"""<!doctype html>
     PA.ids = PA.ids.filter((id) => { const it = itemById(id); return it && it.status !== "sold"; }); saveTray();
     const rows = PA.ids.map((id) => {
       const it = itemById(id);
-      return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(it.name) + '</span><span class="irow-sub">' + esc([it.condition, it.bin_id ? "now in " + binText(it.bin_id) : "not in a bin"].filter(Boolean).join(" · ")) +
-        '</span></div><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
+      return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(it.name) + '</span><span class="irow-sub">' + esc([it.condition, it.bin_id ? "now in " + binText(it.bin_id) : "not in a bin", it.weight_oz == null ? "" : weightText(packedOz(it))].filter(Boolean).join(" · ")) +
+        '</span></div><button class="pl-btn pl-btn--sm tall" data-act="shipping" data-id="' + esc(id) + '" aria-label="Weigh and box ' + esc(it.name) + '">' + (it.weight_oz == null ? "Weigh" : "Weight") + '</button><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
     }).join("");
     const n = PA.ids.length;
     const live = camSupported() && !CAM.unavailable;
@@ -1911,9 +2015,10 @@ PAGE = r"""<!doctype html>
   };
 
   // ── wiring ───────────────────────────────────────────────────────────────────
-  const MENU = [["Record a sale", () => pasteDialog("")], ["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
+  const MENU = [["Record a sale", () => pasteDialog("")], ["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Packaging", () => packagingDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
     close: closeDrawer,
+    shipping: (id) => shippingDialog(id), "pk-new": () => pkEditDialog(""), "pk-edit": (id) => pkEditDialog(id), "pk-del": (id) => pkDelete(id),
     price: (id) => priceDialog(id), sold: (id) => soldDialog(id), list: (id) => listingDialog(id),
     edit: async (id) => itemDialog((await api("/items/" + encodeURIComponent(id))).item),
     del: deleteItem, keep: (id) => setStatus(id, "kept"), withdraw: (id) => setStatus(id, "withdrawn"),

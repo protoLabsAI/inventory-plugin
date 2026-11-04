@@ -729,6 +729,51 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             },
         )
 
+    # ── shipping: packaging presets and each item's packed weight + box (0.15.0) ────────
+    @r.get("/packaging")
+    async def _packaging() -> dict:
+        return {"packaging": store.list_packaging()}
+
+    @r.post("/packaging")
+    async def _new_packaging(body: dict | None = None) -> dict:
+        try:
+            pk = store.upsert_packaging({k: v for k, v in (body or {}).items() if k != "id"}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("packaging.changed", {"id": pk["id"], "action": "create"})
+        return {"packaging": pk}
+
+    @r.put("/packaging/{packaging_id}")
+    async def _put_packaging(packaging_id: str, body: dict | None = None) -> dict:
+        try:
+            pk = store.upsert_packaging({**(body or {}), "id": packaging_id}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("packaging.changed", {"id": pk["id"], "action": "update"})
+        return {"packaging": pk}
+
+    @r.delete("/packaging/{packaging_id}")
+    async def _delete_packaging(packaging_id: str) -> dict:
+        try:
+            n = store.delete_packaging(packaging_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        if not n:
+            raise HTTPException(status_code=404, detail=f"no packaging {packaging_id!r}")
+        emit("packaging.changed", {"id": packaging_id, "action": "delete"})
+        return {"ok": True}
+
+    @r.put("/items/{item_id}/shipping")
+    async def _put_shipping(item_id: str, body: dict | None = None) -> dict:
+        if store.get_item(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"no item {item_id!r}")
+        try:
+            item = store.set_shipping(item_id, body or {}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "shipping"})
+        return {"item": item}
+
     @r.get("/stale")
     async def _stale(listed_days: int = 14, price_days: int | None = None) -> dict:
         return store.stale(listed_days=listed_days, price_days=price_days or stale_price_days(cfg))
