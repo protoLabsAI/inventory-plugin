@@ -45,7 +45,11 @@ Items:
 
 For each item: run ebay_price_check (sold) with a precise buyer-style query (name plus condition words like "new on sprue" or "NIB"). Read notes / headline_count / results_found before the statistics. With at least 3 relevant sold comps, call inventory_set_price with low=p25, target=median, high=p75, basis "eBay sold comps (N sold, incl. shipping)" and the evidence (source=ebay_sold, n, p25, median, p75, query). With fewer, set NO price. If eBay shows a sign-in wall or a challenge page, stop the eBay calls.
 
-Do not start subagents and do not message the operator. Finish by calling inventory_scan_pricing_done("{scan_id}", unpriced) listing every item you did not price, each with item_id and a one-line reason."""
+{sealed}Do not start subagents and do not message the operator. Finish by calling inventory_scan_pricing_done("{scan_id}", unpriced) listing every item you did not price, each with item_id and a one-line reason."""
+
+SEALED = """The box itself: "{box}". Price it SEALED (new in box) the same way, with ebay_price_check (sold) and the same 3-comp rule, but do NOT call inventory_set_price for it: it isn't an item, it's the comparison that tells the operator whether to sell it sealed instead of split. If ebay_net_proceeds is available, use it for the fees: once on the sealed target, and once per piece on the target you set (shipping_charged 0); add the piece fees up. Then call inventory_scan_sealed_price("{scan_id}", low, target, high, n, query, basis, sealed_fees, split_fees) BEFORE inventory_scan_pricing_done. With fewer than 3 sealed comps, call it with target null and say why in basis. Leave a fee argument null when you couldn't compute it; never guess a fee.
+
+"""
 
 
 def session_for(scan_id: str, purpose: str = "identify") -> str:
@@ -77,7 +81,7 @@ def identify_prompt(scan: dict, *, lot_name: str = "", known: list[str] | None =
     return IDENTIFY_UNIT.format(scan_id=scan["id"], lot_hint=hint, known=known_txt)
 
 
-def price_prompt(scan_id: str, items: list[dict]) -> str:
+def price_prompt(scan_id: str, items: list[dict], *, box: str = "") -> str:
     lines = "\n".join(
         f"- {i['id']}: {i['name']}"
         + (
@@ -87,7 +91,8 @@ def price_prompt(scan_id: str, items: list[dict]) -> str:
         )
         for i in items
     )
-    return PRICE.format(scan_id=scan_id, items=lines)
+    sealed = SEALED.format(box=box.replace('"', "'"), scan_id=scan_id) if box else ""
+    return PRICE.format(scan_id=scan_id, items=lines, sealed=sealed)
 
 
 def enqueue(session_id: str, prompt: str, job_id: str, *, delay_seconds: float = 0.0, sdk=None) -> dict:
@@ -132,8 +137,14 @@ def start_identify(store, scan: dict, *, timeout_minutes: int, sdk=None) -> dict
 
 
 def start_pricing(store, scan: dict, items: list[dict], *, timeout_minutes: int, sdk=None) -> dict:
+    box = ""
+    if scan.get("kind") == "box" and not scan.get("parent_id") and scan.get("lot_id"):
+        box = ((store.get_lot(scan["lot_id"]) or {}).get("name") or "").strip()
     res = enqueue(
-        session_for(scan["id"], "price"), price_prompt(scan["id"], items), f"scan-price-{scan['id']}", sdk=sdk
+        session_for(scan["id"], "price"),
+        price_prompt(scan["id"], items, box=box),
+        f"scan-price-{scan['id']}",
+        sdk=sdk,
     )
     if not res.get("ok"):
         return store.pricing_failed(

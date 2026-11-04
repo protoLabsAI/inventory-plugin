@@ -414,7 +414,7 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     # The page uploads the File itself as the body (kit.apiFetch passes a Blob through), its
     # type in Content-Type. Identification and pricing are agent turns this plugin starts
     # (scans.py); the page polls GET /scans/{id} while one is pending.
-    from .automations import stale_price_days
+    from .automations import aging_tiers, stale_price_days
     from .scans import confidence_threshold, scan_timeout, start_identify, start_pricing
 
     tmo = scan_timeout(cfg)
@@ -524,6 +524,21 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         scan = store.get_scan(scan_id, timeout_minutes=tmo)
         _scan_changed(scan, "price")
         return {"scan": scan}
+
+    @r.post("/scans/{scan_id}/sell-sealed")
+    async def _scan_sell_sealed(scan_id: str) -> dict:
+        try:
+            scan = store.sell_sealed(scan_id, actor=ACTOR, timeout_minutes=tmo)
+        except InventoryError as exc:
+            _raise(exc)
+        for i in scan["item_ids"]:
+            emit("item.changed", {"id": i, "action": "sold_sealed"})
+        _scan_changed(scan, "sell_sealed")
+        return {"scan": scan}
+
+    @r.get("/lots/{lot_id}/split-check")
+    async def _lot_split_check(lot_id: str) -> dict:
+        return {"check": store.split_check(lot_id, timeout_minutes=tmo)}
 
     @r.post("/scans/{scan_id}/finish")
     async def _scan_finish(scan_id: str, body: dict | None = None) -> dict:
@@ -721,7 +736,20 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     @r.get("/view-config")
     async def _view_config() -> dict:
         """The operator settings the page needs to render the same way the agent reasons."""
-        return {"stale_price_days": stale_price_days(cfg)}
+        return {"stale_price_days": stale_price_days(cfg), "aging_days": list(aging_tiers(cfg))}
+
+    @r.get("/aging")
+    async def _aging() -> dict:
+        return store.aging(aging_tiers(cfg))
+
+    @r.post("/items/{item_id}/snooze")
+    async def _snooze(item_id: str, body: dict | None = None) -> dict:
+        try:
+            out = store.snooze_aging(item_id, days=(body or {}).get("days", 14), actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "snoozed"})
+        return out
 
     @r.get("/audit")
     async def _audit(limit: int = Query(100, ge=1, le=2000), entity_id: str = "") -> dict:

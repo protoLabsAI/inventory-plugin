@@ -215,6 +215,8 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     # 0.12.0 — the Custom label (SKU) the operator last copied into eBay for this draft ('' = never),
     # so Next can ask them to update it there when the item moves to another bin.
     ("drafts", "sku_copied", ("ALTER TABLE drafts ADD COLUMN sku_copied TEXT NOT NULL DEFAULT ''",)),
+    # 0.14.0 — an aging item the operator put off deciding about, until this date ('' = not snoozed).
+    ("items", "aging_snoozed_until", ("ALTER TABLE items ADD COLUMN aging_snoozed_until TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -1525,6 +1527,98 @@ class InventoryStore:
             "thresholds": {"listed_days": listed_days, "price_days": price_days},
         }
 
+    # ── aging stock ──────────────────────────────────────────────────────────────
+    #: Statuses that can sit unsold on a shelf or a marketplace. `pending` is a sale in progress
+    #: and `planned` is not split yet, so neither ages.
+    AGING_STATUSES = ("available", "listed")
+
+    def aging(self, tiers: tuple[int, int, int] = (45, 90, 120), *, today: str | None = None) -> dict:
+        """Unsold stock that has sat at least the first tier's days, oldest first.
+
+        Days count from the live listing's ``listed_on`` when there is one ("listed"). Without a
+        listing date they count from when the item last became listed/available in the audit
+        trail ("listed" / "not listed"), and failing that from when the item was added ("added").
+        Each row says which basis it used, so the operator knows how solid the number is.
+        Snoozed items are left out until their snooze ends."""
+        today = today or today_iso()
+        t0 = datetime.strptime(today[:10], "%Y-%m-%d").date()
+        tiers = tuple(sorted(int(t) for t in tiers))
+        rows: list[dict] = []
+        with self._read() as con:
+            items = con.execute(
+                f"SELECT * FROM items WHERE status IN ({','.join('?' * len(self.AGING_STATUSES))})",
+                self.AGING_STATUSES,
+            ).fetchall()
+            for r in items:
+                if (r["aging_snoozed_until"] or "") > today:
+                    continue
+                listing = con.execute(
+                    "SELECT channel, url, listed_on FROM listings WHERE item_id=? AND state='active' "
+                    "ORDER BY listed_on LIMIT 1",
+                    (r["id"],),
+                ).fetchone()
+                since, basis, channel, url = "", "", "", ""
+                if listing is not None:
+                    channel, url = listing["channel"], listing["url"]
+                    if listing["listed_on"]:
+                        since, basis = listing["listed_on"][:10], "listed"
+                if not since:
+                    became = con.execute(
+                        "SELECT ts FROM audit WHERE entity='item' AND entity_id=? AND action IN ('update','create') "
+                        "AND json_valid(changes) AND json_extract(changes, '$.status') = ? ORDER BY id DESC LIMIT 1",
+                        (r["id"], r["status"]),
+                    ).fetchone()
+                    if became is not None:
+                        since = became["ts"][:10]
+                        basis = "listed" if r["status"] == "listed" else "not listed"
+                if not since:
+                    since = (r["created_at"] or "")[:10]
+                    basis = "added"
+                try:
+                    days = (t0 - datetime.strptime(since, "%Y-%m-%d").date()).days
+                except ValueError:
+                    continue
+                tier = max((t for t in tiers if days >= t), default=0)
+                if not tier:
+                    continue
+                item = _item_row_to_dict(r)
+                rows.append(
+                    {
+                        "item_id": r["id"],
+                        "name": r["name"],
+                        "status": r["status"],
+                        "bin_id": r["bin_id"],
+                        "lot_id": r["lot_id"],
+                        "target": item.get("target"),
+                        "since": since,
+                        "days": days,
+                        "basis": basis,
+                        "channel": channel,
+                        "url": url,
+                        "tier": tier,
+                        "tier_index": tiers.index(tier),
+                    }
+                )
+        rows.sort(key=lambda x: (-x["days"], x["name"]))
+        return {"items": rows, "tiers": list(tiers), "as_of": today}
+
+    def snooze_aging(self, item_id: str, *, days: int = 14, actor: str = "") -> dict:
+        """Put off the aging decision on one item for ``days`` (1..90). Audited."""
+        try:
+            n = int(days)
+        except (TypeError, ValueError) as exc:
+            raise InventoryError(f"days must be a whole number, got {days!r}") from exc
+        if not 1 <= n <= 90:
+            raise InventoryError("snooze for 1 to 90 days")
+        until = (datetime.now(UTC) + timedelta(days=n)).strftime("%Y-%m-%d")
+        with self._tx() as con:
+            row = con.execute("SELECT id FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise InventoryError(f"no item {item_id!r}")
+            con.execute("UPDATE items SET aging_snoozed_until=?, updated_at=? WHERE id=?", (until, now_iso(), item_id))
+            self._audit(con, "item", item_id, "update", actor, {"aging_snoozed_until": until, "reason": "aging snooze"})
+        return {"item_id": item_id, "snoozed_until": until}
+
     # ── scans: photo intake ──────────────────────────────────────────────────────
     # A scan is a photo (up to MAX_SCAN_PHOTOS) the agent identifies in the background. A BOX
     # scan is something bought to break down: it creates its lot at once (cost known, name
@@ -1544,6 +1638,10 @@ class InventoryStore:
 
     def _scan_dict(self, con, row, timeout_minutes: int, *, children: bool = False) -> dict:
         d = _scan_row_to_dict(row, timeout_minutes)
+        sealed = (d.get("pricing") or {}).get("sealed")
+        if sealed and row["kind"] == "box" and not sealed.get("chosen"):
+            sell = [_item_row_to_dict(r) for r in self._scan_items(con, row) if r["status"] in UNSOLD]
+            d["sealed_vs_split"] = self.sealed_vs_split(sealed, sell) if sell else None
         if children:
             d["units"] = [
                 _scan_row_to_dict(r, timeout_minutes)
@@ -1938,6 +2036,211 @@ class InventoryStore:
             con.execute("UPDATE scans SET pricing=?, updated_at=? WHERE id=?", (json.dumps(pricing), now_iso(), sid))
             self._audit(con, "scan", sid, "price_failed", actor, {"reason": pricing["reason"]})
             return self._scan_dict(con, self._scan_row(con, sid), timeout_minutes)
+
+    # ── sealed vs split ─────────────────────────────────────────────────────────
+    #: Sealed has to beat split by at least this much (and this share of the split total) before
+    #: the view suggests selling the box sealed: a sealed sale is one listing, one buyer, one parcel.
+    SEALED_MARGIN_MIN = 10.0
+    SEALED_MARGIN_SHARE = 0.05
+
+    def record_sealed_price(
+        self,
+        scan_id: str,
+        *,
+        low=None,
+        target=None,
+        high=None,
+        n: int = 0,
+        query: str = "",
+        basis: str = "",
+        sealed_fees=None,
+        split_fees=None,
+        actor: str = "agent",
+        timeout_minutes: int = SCAN_TIMEOUT_MINUTES,
+    ) -> dict:
+        """The pricing turn's sealed price for a BOX scan, kept on the scan (not as an item, since
+        the box is being split). ``target`` None = no usable sealed comps (``basis`` says why).
+        ``sealed_fees`` / ``split_fees`` are the marketplace fees on the sealed target and on the sum
+        of the pieces' targets, as the fee tool reported them; None = unknown (the view then
+        compares gross and says so)."""
+        sid = scan_key(scan_id)
+        with self._tx() as con:
+            row = self._scan_row(con, sid)
+            if row["kind"] != "box":
+                raise InventoryError("only a box scan has a sealed price")
+            pricing = _loads(row["pricing"], {})
+            if pricing.get("state") != "queued":
+                raise InventoryError(f"scan {sid} has no pricing in progress")
+            vals = {}
+            for k, v in (
+                ("low", low),
+                ("target", target),
+                ("high", high),
+                ("sealed_fees", sealed_fees),
+                ("split_fees", split_fees),
+            ):
+                c = to_cents(v)
+                if c is not None and c < 0:
+                    raise InventoryError(f"{k} can't be negative")
+                vals[k] = dollars(c)
+            if vals["target"] is not None and not _clean(basis, 300):
+                raise InventoryError("a sealed price needs its basis (the comps it rests on)")
+            try:
+                n_comps = max(0, int(n or 0))
+            except (TypeError, ValueError) as exc:
+                raise InventoryError(f"n must be a whole number, got {n!r}") from exc
+            pricing["sealed"] = {
+                **vals,
+                "n": n_comps,
+                "query": _clean(query, 200),
+                "basis": _clean(basis, 300) or "No usable sealed comps.",
+                "observed_on": today_iso(),
+            }
+            con.execute("UPDATE scans SET pricing=?, updated_at=? WHERE id=?", (json.dumps(pricing), now_iso(), sid))
+            self._audit(con, "scan", sid, "sealed_priced", actor, pricing["sealed"])
+            return self._scan_dict(con, self._scan_row(con, sid), timeout_minutes, children=True)
+
+    @classmethod
+    def sealed_vs_split(cls, sealed: dict | None, pieces: list[dict]) -> dict | None:
+        """Compare selling a box sealed with selling its pieces at their targets. ``pieces`` are the
+        sell pieces (``target``, ``quantity``). Net when both fee figures are known, gross otherwise
+        (``basis`` says which). None when there's no sealed price to compare."""
+        if not sealed or sealed.get("target") is None:
+            return None
+        priced = [p for p in pieces if p.get("target") is not None]
+        split = round(sum(float(p["target"]) * int(p.get("quantity") or 1) for p in priced), 2)
+        unpriced = len(pieces) - len(priced)
+        fees_known = sealed.get("sealed_fees") is not None and sealed.get("split_fees") is not None
+        s_val = float(sealed["target"]) - (float(sealed["sealed_fees"]) if fees_known else 0.0)
+        p_val = split - (float(sealed["split_fees"]) if fees_known else 0.0)
+        diff = round(s_val - p_val, 2)
+        margin = max(cls.SEALED_MARGIN_MIN, cls.SEALED_MARGIN_SHARE * max(p_val, 0.0))
+        if unpriced:
+            verdict, line = (
+                "incomplete",
+                f"{unpriced} piece{'s' if unpriced != 1 else ''} still unpriced, so the split total is low.",
+            )
+        elif diff >= margin:
+            verdict, line = "sealed", f"Sealed wins by ${diff:,.2f}: one listing, one parcel."
+        elif diff <= -margin:
+            verdict, line = "split", f"Split wins by ${-diff:,.2f}."
+        else:
+            verdict, line = "even", "About even. Sealed is less work."
+        return {
+            "sealed": round(s_val, 2),
+            "split": round(p_val, 2),
+            "sealed_gross": float(sealed["target"]),
+            "split_gross": split,
+            "basis": "net of fees" if fees_known else "gross (fees not known)",
+            "difference": diff,
+            "unpriced": unpriced,
+            "verdict": verdict,
+            "recommendation": line,
+            "sealed_basis": sealed.get("basis", ""),
+            "observed_on": sealed.get("observed_on", ""),
+        }
+
+    def split_check(self, lot_id: str, *, timeout_minutes: int = SCAN_TIMEOUT_MINUTES) -> dict | None:
+        """Sealed vs split for a lot that came from a box scan with a sealed price and whose
+        pieces are ALL still planned (nothing split or sold yet). None otherwise."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT * FROM scans WHERE lot_id=? AND kind='box' AND parent_id='' ORDER BY created_at DESC", (lot_id,)
+            ).fetchall()
+            for row in rows:
+                sealed = (_loads(row["pricing"], {}) or {}).get("sealed")
+                if not sealed or sealed.get("chosen"):
+                    continue
+                items = self._scan_items(con, row)
+                lot_items = con.execute("SELECT status FROM items WHERE lot_id=?", (lot_id,)).fetchall()
+                if not items or any(r["status"] != "planned" for r in lot_items):
+                    return None
+                cmp = self.sealed_vs_split(sealed, [_item_row_to_dict(r) for r in items])
+                return {**cmp, "scan_id": row["id"]} if cmp else None
+        return None
+
+    def sell_sealed(self, scan_id: str, *, actor: str = "", timeout_minutes: int = SCAN_TIMEOUT_MINUTES) -> dict:
+        """Turn a confirmed box scan back into ONE sealed item: the planned pieces are removed
+        (snapshotted into the audit trail), and a sealed item (NIB) takes the lot, priced at the
+        sealed target with its basis and evidence. Refused once any piece is kept, for sale,
+        listed or sold, because then the box is already open."""
+        sid = scan_key(scan_id)
+        with self._tx() as con:
+            row = self._scan_row(con, sid)
+            if row["kind"] != "box" or row["state"] != "confirmed":
+                raise InventoryError("only a confirmed box scan can be sold sealed")
+            sealed = (_loads(row["pricing"], {}) or {}).get("sealed") or {}
+            if sealed.get("target") is None:
+                raise InventoryError("there's no sealed price for this box yet")
+            if sealed.get("chosen"):
+                raise InventoryError("this box is already being sold sealed")
+            pieces = self._scan_items(con, row)
+            opened = [r["name"] for r in pieces if r["status"] != "planned"]
+            if opened:
+                raise InventoryError("the box is already broken down (" + ", ".join(opened[:3]) + "); sell the pieces")
+            lot = con.execute("SELECT * FROM lots WHERE id=?", (row["lot_id"],)).fetchone()
+            if lot is None:
+                raise InventoryError("this scan's lot is gone")
+            system = next((r["system"] for r in pieces if r["system"]), "")
+            for r in pieces:
+                self._delete_item_rows(con, r["id"], actor)
+            base = "SEALED-" + sid[1:]
+            iid, k = base, 2
+            while con.execute("SELECT 1 FROM items WHERE id=?", (iid,)).fetchone() is not None:
+                iid, k = f"{base}-{k}", k + 1
+            ts, day = now_iso(), today_iso()
+            con.execute(
+                "INSERT INTO items(id, lot_id, category, name, condition, quantity, model_count, notes, status, "
+                "target_low_cents, target_cents, target_high_cents, price_basis, price_updated_on, system, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    iid,
+                    lot["id"],
+                    "Box set",
+                    lot["name"],
+                    "NIB",
+                    1,
+                    0,
+                    f"Sold sealed instead of split (scan {sid}).",
+                    "available",
+                    to_cents(sealed.get("low")),
+                    to_cents(sealed["target"]),
+                    to_cents(sealed.get("high")),
+                    sealed.get("basis", ""),
+                    sealed.get("observed_on") or day,
+                    system,
+                    ts,
+                    ts,
+                ),
+            )
+            self._insert_observation(
+                con,
+                iid,
+                observed_on=sealed.get("observed_on") or day,
+                source="ebay_sold",
+                query=sealed.get("query", ""),
+                n=sealed.get("n", 0),
+                median=sealed["target"],
+                p25=sealed.get("low"),
+                p75=sealed.get("high"),
+                basis=sealed.get("basis", ""),
+            )
+            self._audit(
+                con,
+                "item",
+                iid,
+                "create",
+                actor,
+                {"status": "available", "name": lot["name"], "reason": "sold sealed", "scan": sid},
+            )
+            pricing = _loads(row["pricing"], {})
+            pricing["sealed"] = {**sealed, "chosen": "sealed", "item_id": iid}
+            con.execute(
+                "UPDATE scans SET item_ids=?, pricing=?, updated_at=? WHERE id=?",
+                (json.dumps([iid]), json.dumps(pricing), ts, sid),
+            )
+            self._audit(con, "scan", sid, "sell_sealed", actor, {"removed": [r["id"] for r in pieces], "item": iid})
+            return self._scan_dict(con, self._scan_row(con, sid), timeout_minutes, children=True)
 
     def finish_scan(
         self,
