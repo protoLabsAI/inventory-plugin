@@ -1578,7 +1578,7 @@ class InventoryStore:
             rows = {
                 r["id"]: r
                 for r in con.execute(
-                    f"SELECT id, bin_id, status FROM items WHERE id IN ({','.join('?' * len(ids))})", ids
+                    f"SELECT id, bin_id, status, missing_since FROM items WHERE id IN ({','.join('?' * len(ids))})", ids
                 )
             }
             missing = [i for i in ids if i not in rows]
@@ -1605,6 +1605,9 @@ class InventoryStore:
                         {"bin": [was, target], **({"put_away": True} if put_away else {})},
                     )
                     moved.append(i)
+                if rows[i]["missing_since"]:  # it's in someone's hands, so it's found
+                    con.execute("UPDATE items SET missing_since='', updated_at=? WHERE id=?", (ts, i))
+                    self._audit(con, "item", i, "found", actor, {"missing_since": [rows[i]["missing_since"], ""]})
                 if put_away and rows[i]["status"] == "planned":
                     con.execute("UPDATE items SET status='available', updated_at=? WHERE id=?", (ts, i))
                     self._audit(con, "item", i, "update", actor, {"status": "available", "reason": "put away"})
@@ -1615,6 +1618,102 @@ class InventoryStore:
             "unchanged": [i for i in ids if i not in moved],
             "now_available": available,
         }
+
+    def check_bin(self, bin_id: str, found, *, move_here=(), mark_missing=(), actor: str = "") -> dict:
+        """Record a bin check (0.15.0): the operator scanned every label in the bin.
+
+        - ``found``: item ids whose labels were scanned (unknown ids are ignored: an unreadable
+          or foreign label). A missing item that turns up is no longer missing.
+        - ``move_here``: strays found in the bin that belong somewhere else (or nowhere): moved
+          into it, each an audited move. A sold item that has been packed is refused: it left.
+        - ``mark_missing``: items recorded in this bin that weren't scanned. Flagged with today's
+          date (a flag, not a status), audited; found again by a later check, a move, or Found it.
+
+        Stamps the bin's ``checked_on``. One transaction."""
+        bin_id = self._bin_id(bin_id)
+        clean = lambda xs: list(dict.fromkeys(str(i).strip() for i in (xs or []) if str(i).strip()))  # noqa: E731
+        found, move_here, mark_missing = clean(found), clean(move_here), clean(mark_missing)
+        today, ts = today_iso(), now_iso()
+        with self._tx() as con:
+            if con.execute("SELECT 1 FROM bins WHERE id=?", (bin_id,)).fetchone() is None:
+                raise InventoryError(f"no bin {bin_id!r}")
+            want = list(dict.fromkeys(found + move_here + mark_missing))
+            rows = (
+                {
+                    r["id"]: r
+                    for r in con.execute(
+                        f"SELECT id, bin_id, status, missing_since FROM items WHERE id IN ({','.join('?' * len(want))})",
+                        want,
+                    )
+                }
+                if want
+                else {}
+            )
+            unknown = [i for i in move_here + mark_missing if i not in rows]
+            if unknown:
+                raise InventoryError(f"no item(s) {', '.join(repr(u) for u in unknown)}")
+            gone = [i for i in move_here if rows[i]["status"] == "sold" and not rows[i]["bin_id"]]
+            if gone:
+                raise InventoryError(
+                    f"sold and packed, so it shouldn't be in a bin: {', '.join(repr(g) for g in gone)}"
+                )
+            elsewhere = [i for i in mark_missing if rows[i]["bin_id"] != bin_id]
+            if elsewhere:
+                raise InventoryError(
+                    f"not recorded in {bin_id}, so it can't be missing from it: {', '.join(elsewhere)}"
+                )
+            clash = [i for i in mark_missing if i in found]
+            if clash:
+                raise InventoryError(f"scanned in the check, so not missing: {', '.join(clash)}")
+            cleared, moved, missing = [], [], []
+            for i in dict.fromkeys(found + move_here):
+                r = rows.get(i)
+                if r is None:
+                    continue
+                if i in move_here and r["bin_id"] != bin_id:
+                    con.execute("UPDATE items SET bin_id=?, updated_at=? WHERE id=?", (bin_id, ts, i))
+                    self._audit(con, "item", i, "move", actor, {"bin": [r["bin_id"], bin_id], "check": True})
+                    moved.append(i)
+                if r["missing_since"]:
+                    con.execute("UPDATE items SET missing_since='', updated_at=? WHERE id=?", (ts, i))
+                    self._audit(
+                        con, "item", i, "found", actor, {"missing_since": [r["missing_since"], ""], "bin": bin_id}
+                    )
+                    cleared.append(i)
+            for i in mark_missing:
+                if not rows[i]["missing_since"]:
+                    con.execute("UPDATE items SET missing_since=?, updated_at=? WHERE id=?", (today, ts, i))
+                    self._audit(con, "item", i, "missing", actor, {"missing_since": today, "bin": bin_id})
+                    missing.append(i)
+            con.execute("UPDATE bins SET checked_on=?, updated_at=? WHERE id=?", (today, ts, bin_id))
+            expected = [r[0] for r in con.execute("SELECT id FROM items WHERE bin_id=?", (bin_id,))]
+            self._audit(
+                con,
+                "bin",
+                bin_id,
+                "check",
+                actor,
+                {"found": len([i for i in found if i in rows]), "moved": moved, "missing": missing, "cleared": cleared},
+            )
+        return {
+            "bin_id": bin_id,
+            "checked_on": today,
+            "moved": moved,
+            "missing": missing,
+            "found_again": cleared,
+            "in_bin": expected,
+        }
+
+    def clear_missing(self, item_id: str, *, actor: str = "") -> dict:
+        """The operator found an item a bin check had flagged missing."""
+        with self._tx() as con:
+            row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise InventoryError(f"no item {item_id!r}")
+            if row["missing_since"]:
+                con.execute("UPDATE items SET missing_since='', updated_at=? WHERE id=?", (now_iso(), item_id))
+                self._audit(con, "item", item_id, "found", actor, {"missing_since": [row["missing_since"], ""]})
+            return _item_row_to_dict(con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone())
 
     def to_pack(self) -> list[dict]:
         """The pick list: every sale not yet packed, with the item's name and the bin to pull

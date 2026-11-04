@@ -397,6 +397,32 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             "link": sheet_link(SHEETS.put(html)),
         }
 
+    @r.post("/bins/{bin_id}/check")
+    async def _check_bin(bin_id: str, body: dict | None = None) -> dict:
+        body = body or {}
+        lists = {k: body.get(k) or [] for k in ("found", "move_here", "mark_missing")}
+        if not all(isinstance(v, list) for v in lists.values()):
+            raise HTTPException(status_code=400, detail="found, move_here and mark_missing must be lists of item ids")
+        try:
+            out = store.check_bin(
+                bin_id, lists["found"], move_here=lists["move_here"], mark_missing=lists["mark_missing"], actor=ACTOR
+            )
+        except InventoryError as exc:
+            _raise(exc)
+        for i in dict.fromkeys(out["moved"] + out["missing"] + out["found_again"]):
+            emit("item.changed", {"id": i, "action": "check", "bin_id": out["bin_id"]})
+        emit("bin.changed", {"ids": [out["bin_id"]], "action": "check"})
+        return out
+
+    @r.post("/items/{item_id}/found")
+    async def _found(item_id: str) -> dict:
+        try:
+            item = store.clear_missing(item_id, actor=ACTOR)
+        except InventoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        emit("item.changed", {"id": item_id, "action": "found"})
+        return {"item": item}
+
     @r.get("/to-pack")
     async def _to_pack() -> dict:
         return {"sales": store.to_pack()}

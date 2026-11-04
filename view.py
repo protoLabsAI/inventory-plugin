@@ -262,6 +262,7 @@ PAGE = r"""<!doctype html>
       if (f.preset === "stale" && !isStale(i, now)) return false;
       if (f.preset === "nobin" && !(UNSOLD.includes(i.status) && !i.bin_id)) return false;
       if (f.preset === "noweight" && !noWeight(i)) return false;
+      if (f.preset === "missing" && !i.missing_since) return false;
       if (!f.preset && seg[2] && !seg[2].includes(i.status)) return false;
       if (f.system && clean(i.system) !== f.system) return false;
       if (f.lot && i.lot_id !== f.lot) return false;
@@ -434,7 +435,7 @@ PAGE = r"""<!doctype html>
   const forSale = (i) => ["available", "listed", "pending"].includes(i.status);
   function binBody(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
-    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + '<div class="drow muted">' + (b.labels_printed_on ? "Label printed " + esc(b.labels_printed_on) : "No label printed yet") + "</div></div>";
+    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + '<div class="drow muted">' + (b.labels_printed_on ? "Label printed " + esc(b.labels_printed_on) : "No label printed yet") + " · " + (b.checked_on ? esc(sinceText(b.checked_on)) : "never checked") + "</div></div>";
     if (!xs.length) return h + '<div class="dsec"><div class="pl-empty"><div class="pl-empty__title">Nothing in ' + esc(b.id) + ' yet</div><div class="pl-empty__desc">Move items here to record that they live in this bin.</div></div></div>';
     for (const [sys, its] of bySystem(xs)) h += '<div class="dsec"><h3 class="dh">' + esc(sys) + ' <span class="muted">' + its.length + '</span></h3><ul class="list">' + its.map((i) => "<li>" + itemButton(i, [clean(i.condition), (STATUS_LABEL[i.status] || [i.status])[0]].filter(Boolean).join(" · ")) + "</li>").join("") + "</ul></div>";
     return h;
@@ -442,7 +443,7 @@ PAGE = r"""<!doctype html>
   function binFoot(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
     const btn = (act, label, primary = false) => '<button class="pl-btn' + (primary ? " pl-btn--primary" : "") + '" data-act="' + act + '" data-id="' + esc(b.id) + '">' + label + "</button>";
-    return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
+    return btn("movehere", "Move items here", true) + btn("bincheck", "Check this bin") + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
   }
 
   // ── listing drafts: written by an agent turn, copied by you, listed by you ─────────
@@ -565,6 +566,7 @@ PAGE = r"""<!doctype html>
     const live = (it.listings || []).filter((l) => l.state === "active" || l.state === "needs_end");
     const obs = (it.observations || [])[0];
     let h = '<div class="dsec"><div class="drow">' + badge(it.status) + (it.quantity > 1 ? '<span class="muted">×' + esc(it.quantity) + "</span>" : "") + (isStale(it) ? staleBadge : "") + "</div>";
+    if (it.missing_since) h += '<div class="pl-callout pl-callout--warning gap-t"><div class="pl-callout__body">Missing from ' + esc(it.bin_id || "its bin") + " since a check on " + esc(it.missing_since) + '. <button class="pl-btn pl-btn--sm" data-act="found" data-id="' + esc(it.id) + '">Found it</button></div></div>';
     if (it.status === "sold") {
       h += (it.sales || []).map((s) => '<div class="kv"><span class="muted">' + esc(s.sold_on) + "</span><span>" + esc(s.channel) + " · sold " + whole(s.price) + ", net " + whole(s.net) + "</span></div>").join("");
     }
@@ -685,6 +687,7 @@ PAGE = r"""<!doctype html>
       else if (d && d.kind === "history") openHistory();
       else if (d && d.kind === "scan") scPaint();
       else if (d && d.kind === "putaway") paPaint();
+      else if (d && d.kind === "bincheck") bcPaint();
       else if (d && d.kind === "paste") pastePaint();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
@@ -795,6 +798,8 @@ PAGE = r"""<!doctype html>
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
+    const missing = items.filter((i) => i.missing_since).length;
+    if (missing) chores.push('<li><button class="irow" data-see="missing"><span class="irow-main">' + missing + " item" + (missing === 1 ? " is" : "s are") + ' missing from their bin</span><span class="muted">See them</span></button></li>');
     const unweighed = items.filter(noWeight).length;
     if (unweighed) chores.push('<li><button class="irow" data-see="noweight"><span class="irow-main">' + unweighed + " for-sale item" + (unweighed === 1 ? " has" : "s have") + ' no packed weight</span><span class="muted">Weigh them</span></button></li>');
     if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
@@ -807,6 +812,7 @@ PAGE = r"""<!doctype html>
     if (f.preset === "stale") chips.push(["preset", "Stale price"]);
     if (f.preset === "nobin") chips.push(["preset", "Not in a bin"]);
     if (f.preset === "noweight") chips.push(["preset", "No packed weight"]);
+    if (f.preset === "missing") chips.push(["preset", "Missing"]);
     if (f.bin) chips.push(["bin", f.bin === "-" ? "No bin" : "Bin " + binText(f.bin)]);
     if (f.system) chips.push(["system", f.system]);
     if (f.lot) chips.push(["lot", lotName(f.lot)]);
@@ -891,7 +897,7 @@ PAGE = r"""<!doctype html>
   }
   function renderBins() {
     if (!state.bins.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Number your boxes or shelves B01, B02 … and record what lives where. ' + (state.unbinned ? state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + " no location yet." : "") + '</div><div class="pl-empty__action"><button class="pl-btn pl-btn--primary" data-act="newbins">Create bins</button></div></div>';
-    const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
+    const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + (b.checked_on ? " · " + esc(sinceText(b.checked_on)) : "") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
     const loose = state.unbinned ? '<ul class="list note"><li><button class="irow" data-see="nobin"><span class="irow-main"><span class="irow-name">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? "" : "s") + ' not in a bin</span><span class="irow-sub">Open them in Stock and move them</span></span></button></li></ul>' : "";
     return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><span class="row-acts"><button class="pl-btn pl-btn--sm pl-btn--primary" data-act="putaway">Put away</button><button class="pl-btn pl-btn--sm" data-act="printlabels">Print labels</button><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></span></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
   }
@@ -1820,7 +1826,7 @@ PAGE = r"""<!doctype html>
       return !(fp && typeof fp.allowsFeature === "function" && fp.allowsFeature("camera") === false);
     } catch (_) { return false; }
   }
-  const CAM = { on: false, stream: null, track: null, el: null, video: null, canvas: null, g: null, raf: 0, last: 0, frames: 0, seen: new Map(), lastHit: 0, idle: 0, paused: false, idled: false, audio: null, torch: false, torchOn: false, error: "", unavailable: false };
+  const CAM = { ctx: "putaway", on: false, stream: null, track: null, el: null, video: null, canvas: null, g: null, raf: 0, last: 0, frames: 0, seen: new Map(), lastHit: 0, idle: 0, paused: false, idled: false, audio: null, torch: false, torchOn: false, error: "", unavailable: false };
   function camBeep() {
     const a = CAM.audio; if (!a) return;
     try {
@@ -1848,8 +1854,11 @@ PAGE = r"""<!doctype html>
     slot.appendChild(CAM.el);
     if (CAM.video && CAM.video.paused && CAM.on) CAM.video.play().catch(() => {});
   }
+  // The viewfinder serves two drawers: Put away, and a bin check (0.15.0). Whichever is open owns it.
+  const camRepaint = () => (CAM.ctx === "bincheck" ? bcPaint() : paPaint());
   async function camStart() {
     if (CAM.on) return;
+    CAM.ctx = state.drawer && state.drawer.kind === "bincheck" ? "bincheck" : "putaway";
     CAM.error = ""; CAM.idled = false;
     try {  // the AudioContext must be made inside this tap, or iOS keeps it muted
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -1863,20 +1872,20 @@ PAGE = r"""<!doctype html>
       const name = (e && e.name) || "";
       if (name === "NotAllowedError") CAM.error = "Camera permission was refused. Allow it in Settings ▸ Safari ▸ Camera, or take a photo instead.";
       else { CAM.unavailable = true; CAM.error = "The live camera isn't available here, so take a photo of the label instead."; }
-      return paPaint();
+      return camRepaint();
     }
-    if (!state.drawer || state.drawer.kind !== "putaway") { stream.getTracks().forEach((t) => t.stop()); return; }
+    if (!state.drawer || state.drawer.kind !== CAM.ctx) { stream.getTracks().forEach((t) => t.stop()); return; }
     if (!CAM.el) camBuild();
     CAM.stream = stream; CAM.track = stream.getVideoTracks()[0] || null;
     try { CAM.torch = !!(CAM.track && CAM.track.getCapabilities && CAM.track.getCapabilities().torch); } catch (_) { CAM.torch = false; }
     CAM.torchOn = false; CAM.video.srcObject = stream; CAM.on = true; CAM.paused = false; CAM.seen.clear(); CAM.frames = 0; CAM.last = 0;
     CAM.lastHit = Date.now();
-    paPaint();
+    camRepaint();
     CAM.video.play().catch(() => {});
     CAM.raf = requestAnimationFrame(camTick);
     clearInterval(CAM.idle);
-    CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; paPaint(); } }, 5000);
-    paSay("Camera on. Point it at a label.");
+    CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; camRepaint(); } }, 5000);
+    (CAM.ctx === "bincheck" ? bcSay : paSay)("Camera on. Point it at a label.");
   }
   function camStop() {
     cancelAnimationFrame(CAM.raf); CAM.raf = 0; clearInterval(CAM.idle); CAM.idle = 0;
@@ -1901,6 +1910,7 @@ PAGE = r"""<!doctype html>
     const now = Date.now();
     if (!camFresh(CAM.seen, text, now)) return;
     CAM.lastHit = now;
+    if (CAM.ctx === "bincheck") { if (bcApply(parseLabel(text), text)) { camBeep(); camFlash(); } return; }
     const lab = parseLabel(text);
     if (!lab) { PA.note = "That QR code isn't an Inventory label."; return paPaint(); }
     if (lab.kind === "item") {
@@ -1929,7 +1939,7 @@ PAGE = r"""<!doctype html>
   async function camTorch() {
     if (!CAM.track || !CAM.torch) return;
     try { await CAM.track.applyConstraints({ advanced: [{ torch: !CAM.torchOn }] }); CAM.torchOn = !CAM.torchOn; } catch (_) { CAM.torch = false; }
-    paPaint();
+    camRepaint();
   }
   function openPutAway() { ++drawerSeq; state.drawer = { kind: "putaway" }; PA.note = ""; paPaint(); }
   function paPaint() {
@@ -2010,8 +2020,115 @@ PAGE = r"""<!doctype html>
     "pa-clear": () => { PA.ids = []; saveTray(); PA.note = ""; paPaint(); },
     "pa-type": () => { const el = $("#f_pa_id"); const lab = parseTyped(el ? el.value : ""); if (!lab) return toast("Type an item id or a bin id", "warning"); return paApply(lab); },
     "pa-cam": () => camStart(),
-    "pa-camstop": () => { camStop(); CAM.idled = false; paPaint(); },
+    "pa-camstop": () => { camStop(); CAM.idled = false; camRepaint(); },
     "pa-torch": () => camTorch(),
+  };
+
+  // ── check a bin (0.15.0): scan every label in it, see what's there, missing or astray ──────
+  const BC = { bin: "", found: new Set(), strays: new Map(), unknown: [], note: "", busy: false };
+  const bcSay = (t) => { const l = $("#bc-live"); if (l) l.textContent = t; };
+  // What one scanned label means for the bin being checked. Pure: unit-tested under node.
+  function bcClassify(lab, bin, items) {
+    if (!lab) return { kind: "foreign" };
+    if (lab.kind === "bin") return { kind: lab.id === bin ? "thisbin" : "otherbin", id: lab.id };
+    const it = items.find((i) => i.id === lab.id) || items.find((i) => i.id.toLowerCase() === String(lab.id).toLowerCase());
+    if (!it) return { kind: "unknown", id: lab.id };
+    if (it.bin_id === bin) return { kind: "found", id: it.id };
+    if (it.status === "sold" && !it.bin_id) return { kind: "sold", id: it.id };
+    return { kind: it.bin_id ? "elsewhere" : "loose", id: it.id, from: it.bin_id || "" };
+  }
+  function openCheck(bin) {
+    if (!binById(bin)) return toast("Bin " + bin + " no longer exists", "warning");
+    ++drawerSeq; state.drawer = { kind: "bincheck", id: bin };
+    Object.assign(BC, { bin, found: new Set(), strays: new Map(), unknown: [], note: "", busy: false });
+    bcPaint();
+  }
+  // Returns true when the label added something new (for the beep).
+  function bcApply(lab, raw = "") {
+    const c = bcClassify(lab, BC.bin, state.items);
+    let fresh = false;
+    if (c.kind === "found") { fresh = !BC.found.has(c.id); BC.found.add(c.id); BC.note = ""; if (fresh) bcSay("Found " + (itemById(c.id) || {}).name); }
+    else if (["elsewhere", "loose", "sold"].includes(c.kind)) { fresh = !BC.strays.has(c.id); BC.strays.set(c.id, c); BC.note = ""; if (fresh) bcSay((itemById(c.id) || {}).name + " doesn't belong here"); }
+    else if (c.kind === "unknown") { fresh = !BC.unknown.includes(c.id); if (fresh) BC.unknown.push(c.id); BC.note = ""; }
+    else if (c.kind === "thisbin") BC.note = "That's this bin's own label. Scan the pieces in it.";
+    else if (c.kind === "otherbin") BC.note = "That's " + c.id + "'s label. Finish checking " + BC.bin + " first.";
+    else BC.note = raw ? "That QR code isn't an Inventory label." : "Couldn't read a label. Retake it closer, flat and in good light, or type the id below.";
+    bcPaint();
+    return fresh;
+  }
+  const STRAY_TEXT = { elsewhere: (c) => "In another bin: " + c.from + " → move here?", loose: () => "Not in a bin → move here?", sold: () => "Sold: should not be here" };
+  function bcPaint() {
+    if (!state.drawer || state.drawer.kind !== "bincheck") return;
+    const b = binById(BC.bin); if (!b) { closeDrawer(); return; }
+    const expected = state.items.filter((i) => i.bin_id === b.id);
+    const found = expected.filter((i) => BC.found.has(i.id)), notYet = expected.filter((i) => !BC.found.has(i.id));
+    const li = (i, sub, tag = "") => '<li class="unit"><div class="irow-main"><span class="irow-name">' + tag + esc(i.name) + '</span><span class="irow-sub">' + esc(sub) + "</span></div></li>";
+    const live = camSupported() && !CAM.unavailable;
+    const camUi = CAM.on
+      ? '<div id="pa-cam-slot" class="gap-t"></div><div class="drow cam-acts"><span class="muted" aria-hidden="true">' + found.length + " of " + expected.length + " found</span>" +
+        (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
+        '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
+      : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
+    let h = '<p class="muted">Scan the label on every piece in ' + esc(b.id) + ". Found " + found.length + " of " + expected.length + (BC.strays.size ? ", and " + BC.strays.size + " that don't belong here" : "") + ".</p>" + camUi +
+      (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
+      (BC.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
+      (BC.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(BC.note) + "</div></div>" : "");
+    if (BC.strays.size) h += '<div class="pl-eyebrow gap-t">Doesn\'t belong here · ' + BC.strays.size + '</div><ul class="list">' + [...BC.strays.values()].map((c) => li(itemById(c.id) || { name: c.id }, STRAY_TEXT[c.kind](c), '<span class="pl-badge pl-badge--warning">' + (c.kind === "sold" ? "sold" : "stray") + "</span> ")).join("") + "</ul>";
+    if (BC.unknown.length) h += '<div class="pl-eyebrow gap-t">Unknown label · ' + BC.unknown.length + '</div><ul class="list">' + BC.unknown.map((id) => li({ name: id }, "No item with this id here. The label may belong to another agent, or the item was deleted.")).join("") + "</ul>";
+    if (notYet.length) h += '<div class="pl-eyebrow gap-t">Not scanned yet · ' + notYet.length + '</div><ul class="list">' + notYet.map((i) => li(i, [i.condition, i.missing_since ? "missing since " + i.missing_since : ""].filter(Boolean).join(" · "))).join("") + "</ul>";
+    if (found.length) h += '<div class="pl-eyebrow gap-t">Found · ' + found.length + '</div><ul class="list">' + found.map((i) => li(i, i.condition || "", '<span aria-hidden="true">✓</span> ')).join("") + "</ul>";
+    if (!expected.length && !BC.strays.size) h += '<p class="muted gap-t">Nothing is recorded in ' + esc(b.id) + ". Anything you scan here is a stray you can move in.</p>";
+    h += '<div class="form one gap-t">' + field("bc_id", "Or type an item id", "", { placeholder: "an item id", hint: "For a label that won't read." }) + '</div><div class="drow"><button class="pl-btn" data-act="bc-type">Add</button></div><div class="sr-only" id="bc-live" aria-live="polite"></div>';
+    const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
+    const foot = camBtn + capBtn("bc", "Take a photo of a label", !live) + '<button class="pl-btn block' + (live ? "" : "") + '" data-act="bc-finish">Finish check</button><button class="pl-btn pl-btn--ghost block" data-act="close">Cancel</button>';
+    paintDrawer("Check " + '<span class="bin-id">' + esc(b.id) + "</span>", '<div id="bincheck">' + h + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+    if (CAM.on) camMount();
+  }
+  async function bcScan(file) {
+    if (!file || BC.busy) return;
+    BC.busy = true; BC.note = ""; bcPaint();
+    let text = "";
+    try { text = await decodePhoto(file); } catch (e) { BC.busy = false; BC.note = e.message || String(e); return bcPaint(); }
+    BC.busy = false;
+    bcApply(text ? parseLabel(text) : null, text);
+  }
+  async function bcFinish() {
+    const b = binById(BC.bin); if (!b) return;
+    const expected = state.items.filter((i) => i.bin_id === b.id);
+    const notYet = expected.filter((i) => !BC.found.has(i.id));
+    const movable = [...BC.strays.values()].filter((c) => c.kind !== "sold").map((c) => c.id);
+    const sold = [...BC.strays.values()].filter((c) => c.kind === "sold");
+    const box = (name, label, n) => n ? '<label class="pl-checkbox span2"><input type="checkbox" class="pl-checkbox__input" name="' + name + '" value="1" checked><span class="pl-checkbox__box"></span><span class="pl-checkbox__label">' + esc(label) + "</span></label>" : "";
+    await dialog({
+      title: "Finish checking " + b.id, submit: "Save the check",
+      body: '<div class="span2">Found ' + (expected.length - notYet.length) + " of " + expected.length + " recorded here" + (BC.strays.size ? ", plus " + BC.strays.size + " stray" + (BC.strays.size === 1 ? "" : "s") : "") + ".</div>" +
+        box("move", "Move the " + movable.length + " stray" + (movable.length === 1 ? "" : "s") + " into " + b.id, movable.length) +
+        box("missing", "Mark the " + notYet.length + " not scanned as missing", notYet.length) +
+        (sold.length ? '<div class="span2 pl-callout pl-callout--warning"><div class="pl-callout__body">Take out what\'s sold and packed: ' + esc(sold.map((c) => (itemById(c.id) || {}).name || c.id).join(", ")) + ".</div></div>" : "") +
+        '<div class="span2 muted">The bin is stamped as checked today. Anything marked missing shows under Next until it turns up.</div>',
+      onSubmit: async (v) => {
+        const r = await api("/bins/" + encodeURIComponent(b.id) + "/check", "POST", {
+          found: [...BC.found, ...BC.strays.keys()],
+          move_here: v.move ? movable : [],
+          mark_missing: v.missing ? notYet.map((i) => i.id) : [],
+        });
+        toast("Checked " + b.id + (r.moved.length ? " · moved " + r.moved.length + " in" : "") + (r.missing.length ? " · " + r.missing.length + " missing" : ""), "success");
+        camStop(); CAM.idled = false;
+        await refresh();
+        openBin(b.id);
+      },
+    });
+  }
+  const sinceText = (d) => { const n = Math.floor(daysOld(d)); return !Number.isFinite(n) ? "" : n <= 0 ? "checked today" : "checked " + n + " d ago"; };
+  async function foundIt(id) {
+    try { await api("/items/" + encodeURIComponent(id) + "/found", "POST"); toast("Marked found", "success"); } catch (e) { return toast(e.message, "error"); }
+    await refresh();
+  }
+  const BC_ACTS = {
+    bincheck: (id) => openCheck(id),
+    "bc-type": () => { const el = $("#f_bc_id"); const s = clean(el ? el.value : ""); if (!s) return toast("Type an item id", "warning"); bcApply(parseLabel(s) || (binById(s.toUpperCase()) ? { kind: "bin", id: s.toUpperCase() } : { kind: "item", id: s }), s); },
+    "bc-finish": () => bcFinish(),
+    found: (id) => foundIt(id),
   };
 
   // ── wiring ───────────────────────────────────────────────────────────────────
@@ -2048,7 +2165,7 @@ PAGE = r"""<!doctype html>
     bundle: () => { const xs = state.aging.filter((a) => state.agingSel.has(a.item_id)); if (xs.length < 2) return; composeToChat(bundleText(xs)); },
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
-  Object.assign(ACTS, SCAN_ACTS, PA_ACTS);
+  Object.assign(ACTS, SCAN_ACTS, PA_ACTS, BC_ACTS);
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
     else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
@@ -2091,7 +2208,7 @@ PAGE = r"""<!doctype html>
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
       if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
-      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
+      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "bc" ? bcScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
       if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
     });
@@ -2122,7 +2239,7 @@ PAGE = r"""<!doctype html>
     if (mq) mq.addEventListener("change", () => { render(); const d = state.drawer; if (d) refresh(); });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && scanOpen()) poll(); });
     // A hidden view never holds the camera: stop it, and offer Resume when it comes back.
-    document.addEventListener("visibilitychange", () => { if (document.hidden && CAM.on) { camStop(); CAM.idled = true; paPaint(); } });
+    document.addEventListener("visibilitychange", () => { if (document.hidden && CAM.on) { camStop(); CAM.idled = true; camRepaint(); } });
     window.addEventListener("pagehide", () => { if (CAM.on) camStop(); });
     document.addEventListener("error", (e) => {
       const img = e.target;
