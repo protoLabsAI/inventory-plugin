@@ -138,7 +138,7 @@ def test_the_page_states_each_rows_basis_and_one_move_per_tier():
     r = out["rows"]
     assert "Drop another 10%, or bundle it" in r and "Send an offer to watchers, or drop 10%" in r
     assert "Decide: clearance, bundle, or pull it" in r
-    assert "Old &lt;b&gt;" in r and "<b>" not in r.replace("<b", "", 0)  # escaped
+    assert "Old &lt;b&gt;" in r and "Old <b>" not in r  # the name is escaped, never raw HTML
     assert 'data-act="markdown" data-id="C" disabled' in r  # nothing to mark down without a target
     assert "watchers" not in out["bundle"].split("\n", 1)[1]  # no invented watcher data
     assert "- Old <b> (A), now $40, listed 95 days on eBay" in out["bundle"]
