@@ -212,6 +212,9 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     ("bins", "labels_printed_on", ("ALTER TABLE bins ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
     # 0.10.0 — when an item's own sticker was last put on a printable sheet ('' = never).
     ("items", "labels_printed_on", ("ALTER TABLE items ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
+    # 0.12.0 — the Custom label (SKU) the operator last copied into eBay for this draft ('' = never),
+    # so Next can ask them to update it there when the item moves to another bin.
+    ("drafts", "sku_copied", ("ALTER TABLE drafts ADD COLUMN sku_copied TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -261,6 +264,21 @@ _DAY_MONTH_RE = re.compile(
     r"\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b(?!,?\s*\d{4})",
     re.IGNORECASE,
 )
+
+
+#: eBay's Custom label field is ``Item.SKU`` in the Trading API, "Maximum length: 50 characters"
+#: (developer.ebay.com/api-docs/user-guides/static/trading-user-guide/skus.html; KB 1037 maps the
+#: seller tools' "Custom label" to Item.SKU with the same limit).
+CUSTOM_LABEL_MAX = 50
+
+
+def custom_label(bin_id, item_id) -> str:
+    """The eBay Custom label (SKU) for an item: its bin FIRST, then its id (``B03-helsmiths…``),
+    so eBay's pick list and order search sort by where it lives. No bin → the id alone. The bin is
+    upper-cased (bins are); the id keeps its case. Capped at eBay's 50 characters, keeping the bin."""
+    iid = str(item_id or "").strip()
+    b = str(bin_id or "").strip().upper()
+    return ((b + "-" + iid) if b else iid)[:CUSTOM_LABEL_MAX]
 
 
 def new_paste_id() -> str:
@@ -2035,7 +2053,16 @@ class InventoryStore:
         else:
             listing_state = state
         copied_at = row["copied_at"] if row is not None else ""
+        sku = custom_label(item["bin_id"], item["id"])
+        sku_copied = row["sku_copied"] if row is not None else ""
         return {
+            "sku": sku,
+            "sku_copied": sku_copied,
+            # The label pasted into eBay no longer says where the item is: ask to update it there.
+            "sku_stale": bool(sku_copied)
+            and sku_copied != sku
+            and state in ("copied", "live")
+            and item["status"] != "sold",
             "item_id": item["id"],
             "state": state,
             "listing_state": listing_state,
@@ -2069,7 +2096,19 @@ class InventoryStore:
                     continue
                 d = self._draft_dict(con, item, row, timeout_minutes)
                 out.append(
-                    {k: d[k] for k in ("item_id", "state", "listing_state", "reason", "copied_at", "copied_stale")}
+                    {
+                        k: d[k]
+                        for k in (
+                            "item_id",
+                            "state",
+                            "listing_state",
+                            "reason",
+                            "copied_at",
+                            "copied_stale",
+                            "sku",
+                            "sku_stale",
+                        )
+                    }
                 )
             return out
 
@@ -2160,19 +2199,34 @@ class InventoryStore:
     def draft_copied(self, item_id: str, what: str, *, actor: str = "") -> dict:
         """The operator copied part of the draft. The first copy moves it to ``copied``, so Next
         can ask a day later whether it went live."""
-        if what not in ("title", "price", "description"):
-            raise InventoryError("copied what? title, price or description")
+        if what not in ("title", "price", "description", "sku"):
+            raise InventoryError("copied what? title, price, description or sku")
         with self._tx() as con:
             item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
             row = self._draft_row(con, item_id)
             if item is None or row is None or row["state"] not in ("draft", "copied"):
                 raise InventoryError(f"no draft to copy for {item_id!r}")
+            if what == "sku":
+                sku = custom_label(item["bin_id"], item["id"])
+                con.execute("UPDATE drafts SET sku_copied=?, updated_at=? WHERE item_id=?", (sku, now_iso(), item_id))
             if row["state"] == "draft":
                 ts = now_iso()
                 con.execute(
                     "UPDATE drafts SET state='copied', copied_at=?, updated_at=? WHERE item_id=?", (ts, ts, item_id)
                 )
                 self._audit(con, "draft", item_id, "copy", actor, {"what": what})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def draft_sku_updated(self, item_id: str, *, actor: str = "") -> dict:
+        """The operator put the item's current Custom label into eBay (after it moved bins)."""
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            row = self._draft_row(con, item_id)
+            if item is None or row is None:
+                raise InventoryError(f"no draft for {item_id!r}")
+            sku = custom_label(item["bin_id"], item["id"])
+            con.execute("UPDATE drafts SET sku_copied=?, updated_at=? WHERE item_id=?", (sku, now_iso(), item_id))
+            self._audit(con, "draft", item_id, "sku", actor, {"sku": [row["sku_copied"], sku]})
             return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
 
     def draft_live(self, item_id: str, url: str, *, actor: str = "") -> dict:

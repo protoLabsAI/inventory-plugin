@@ -274,7 +274,7 @@ PAGE = r"""<!doctype html>
     if (a.entity === "paste") return ({ create: "Pasted an order to record", propose: "Read a pasted order", fail: "Couldn't read a pasted order", retry: "Asked again to read a pasted order", record: "Recorded the sales from a pasted order", discard: "Discarded a pasted order" }[a.action] || "Pasted order updated") + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
     if (a.entity === "listing" && a.action === "needs_end") return "Listing " + a.entity_id + " is still up after a sale" + (c.sold_on ? " on " + c.sold_on : "") + ": end it there";
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
-    if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
+    if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: ", sku: "Updated the eBay custom label for " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
     if (a.entity === "bin" && a.action === "labels") return "Printed the label for bin " + a.entity_id;
     if (a.entity === "bin") return (a.action === "create" ? "Made bin " : a.action === "delete" ? "Removed bin " : "Updated bin ") + a.entity_id + (c.label ? " (" + clean(c.label) + ")" : "");
     if (a.entity === "sale" && a.action === "packed") return "Packed " + (nameOf(c.item_id) || c.item_id || "an item");
@@ -448,6 +448,7 @@ PAGE = r"""<!doctype html>
     return cpRow("title", "Title", d.title, '<span class="muted cnt' + (n > TITLE_MAX ? " neg" : "") + '">' + n + " / " + TITLE_MAX + " characters</span>") +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Price</span><span class="money">' + esc(fmt(it.target)) + '</span><span class="irow-sub">' + esc(it.price_basis ? "Basis: " + clip(it.price_basis, 140) : "No basis recorded") + '</span><span class="irow-sub">Change it with Set price.</span></div>' + '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="price">Copy price</button></div>' +
       cpRow("description", "Description", d.description) +
+      cpRow("sku", "Custom label (SKU)", d.sku, '<span class="irow-sub">Bin first, so eBay\'s pick list says where it lives. Paste it into Custom label.</span>') +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Photos</span><span class="irow-sub">' + (nPhotos ? nPhotos + " photo" + (nPhotos === 1 ? "" : "s") + ", metadata stripped, cover first" : "No photos from a scan") + "</span></div>" + (nPhotos ? '<button class="pl-btn pl-btn--sm tall" data-act="dphotos" data-id="' + esc(it.id) + '">Download photos</button>' : "") + "</div>" +
       (d.notes ? '<p class="basis notes muted">' + esc(d.notes) + "</p>" : "") +
       '<div class="drow gap-t">' + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="dlive" data-id="' + esc(it.id) + '">I listed it</button>' + ask("Regenerate", "redraft") + "</div>" +
@@ -476,11 +477,11 @@ PAGE = r"""<!doctype html>
   async function copyDraft(btn) {
     const d = state.openDraft; const it = d && state.items.find((i) => i.id === d.item_id); if (!d || !it) return;
     const k = btn.dataset.k;
-    const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : d.description;
+    const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : k === "sku" ? d.sku : d.description;
     const ok = await copyText(text);
     if (!ok) return toast("Couldn't copy here. Select the text and copy it.", "warning");
     const was = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { if (btn.isConnected) btn.textContent = was; }, 2000);
-    if (d.state === "draft") {
+    if (d.state === "draft" || k === "sku") {
       try { const { draft } = await api("/items/" + encodeURIComponent(d.item_id) + "/draft/copied", "POST", { what: k }); state.openDraft = draft; state.drafts[d.item_id] = draft; const b = document.querySelector("#lsec .dh .pl-badge"); if (b) b.outerHTML = draftBadge(draft.listing_state); }
       catch (e) { /* the copy worked; the state catches up on the next load */ }
     }
@@ -673,6 +674,8 @@ PAGE = r"""<!doctype html>
       const rows = state.scans.slice(0, ROW_CAP).map((s) => '<li><button class="irow" data-act="resumescan" data-id="' + esc(s.id) + '"><span class="irow-main"><span class="irow-name">' + esc(scanTitle(s)) + '</span><span class="irow-sub">' + esc(scanSub(s)) + "</span></span>" + (scanNeedsCheck(s) ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join("");
       h += sec("Needs a look", state.scans.length, rows, "");
     }
+    const moved = items.filter((i) => state.drafts[i.id] && state.drafts[i.id].sku_stale);
+    if (moved.length) h += sec("Update the custom label on eBay", moved.length, moved.slice(0, ROW_CAP).map((i) => '<li><button class="irow" data-item="' + esc(i.id) + '"><span class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">moved bins · now ' + esc(state.drafts[i.id].sku) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="skucopy" data-id="' + esc(i.id) + '">Copy</button><button class="pl-btn pl-btn--sm rowact" data-act="skudone" data-id="' + esc(i.id) + '">Done</button></li>').join(""), "");
     const stuck = items.filter((i) => i.status === "available" && state.drafts[i.id] && state.drafts[i.id].copied_stale);
     if (stuck.length) h += sec("Copied, not live yet", stuck.length, stuck.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, "copied " + String(state.drafts[i.id].copied_at).slice(0, 10) + " · did it go live?") + "</li>").join(""), "");
     const ready = readyToList(items);
@@ -1687,6 +1690,8 @@ PAGE = r"""<!doctype html>
     ended: (id) => endedListing(id),
     pastesale: (id) => { const x = document.querySelector("#dialog-root [data-x]"); if (x) x.click(); return pasteDialog(id || ""); },
     openpaste: (id) => openPaste(id),
+    skucopy: async (id) => { const d = state.drafts[id]; if (!d) return; toast((await copyText(d.sku)) ? "Copied " + d.sku : "Couldn't copy here. Select the label and copy it.", "info"); },
+    skudone: async (id) => { try { await api("/items/" + encodeURIComponent(id) + "/draft/sku-updated", "POST"); } catch (e) { return toast(e.message, "error"); } await refresh(); },
     "paste-record": () => recordPaste(), "paste-retry": () => retryPaste(), "paste-discard": () => discardPaste(),
     "paste-byhand": (id) => { closeDrawer(); return soldDialog(id); }, "paste-drop": (i) => dropPasteLine(Number(i)),
     "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),

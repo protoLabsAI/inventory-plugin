@@ -419,7 +419,9 @@ def test_the_listing_draft_section_renders_each_state_safely_under_node():
         and 'data-act="redraft"' in r
         and 'data-act="dphotos"' in r
     )
-    assert r.count('data-act="dcopy"') == 3 and 'data-k="price"' in r  # title, price and description
+    assert (
+        r.count('data-act="dcopy"') == 4 and 'data-k="price"' in r and 'data-k="sku"' in r
+    )  # title, price, description, SKU
     assert "Change it with Set price" in r and ".." not in r  # the price isn't edited in the draft
     assert (
         'data-act="draft"' in out["none"]

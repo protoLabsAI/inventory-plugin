@@ -607,6 +607,15 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         _draft_changed(d, "copy")
         return {"draft": d}
 
+    @r.post("/items/{item_id}/draft/sku-updated")
+    async def _draft_sku_updated(item_id: str) -> dict:
+        try:
+            d = store.draft_sku_updated(item_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        _draft_changed(d, "sku")
+        return {"draft": d}
+
     @r.post("/items/{item_id}/draft/live")
     async def _draft_live(item_id: str, body: dict) -> dict:
         try:
