@@ -78,7 +78,7 @@ class TestBins:
     def test_moves_are_audited_with_from_and_to_and_all_or_nothing(self, seeded):
         seeded.create_bins(count=2, actor="t")
         out = seeded.move_items(["A", "B"], "b01", actor="t")
-        assert out == {"bin_id": "B01", "moved": ["A", "B"], "unchanged": []}
+        assert out == {"bin_id": "B01", "moved": ["A", "B"], "unchanged": [], "now_available": []}
         out = seeded.move_items(["A", "B"], "B02", actor="t")
         assert out["moved"] == ["A", "B"]
         assert seeded.move_items(["A"], "B02", actor="t")["unchanged"] == ["A"]
