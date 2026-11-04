@@ -193,3 +193,19 @@ def test_shipping_is_reachable_from_the_drawer_put_away_more_and_next():
     assert "SHIP[k]" in copy and copy.index("SHIP[k]") < copy.index(
         "/draft/copied"
     )  # package numbers don't flip the draft
+
+
+@pytest.mark.parametrize(("tare", "want"), [(0, 0), ("0", 0), ("", 0), (None, 0), (0.0, 0), (3.2, 4)])
+def test_packaging_can_weigh_nothing_but_not_less(store, tare, want):
+    # Review on #25: a 0 empty weight went through the item weight rule and was refused, and the
+    # Edit dialog prefills 0 for a preset saved blank, so editing one could never be saved.
+    pk = store.upsert_packaging({"name": "Poly bag", "tare_oz": tare}, actor="t")
+    assert pk["tare_oz"] == want
+    again = store.upsert_packaging({"id": pk["id"], "name": "Poly bag", "tare_oz": str(pk["tare_oz"])}, actor="t")
+    assert again["tare_oz"] == want
+
+
+def test_packaging_refuses_a_negative_or_garbage_empty_weight(store):
+    for bad in (-1, "-0.5", "abc"):
+        with pytest.raises(InventoryError, match="empty weight"):
+            store.upsert_packaging({"name": "Box", "tare_oz": bad}, actor="t")

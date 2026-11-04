@@ -666,6 +666,20 @@ def weight_ounces(lb=None, oz=None, *, total_oz=None) -> int | None:
     return ounces
 
 
+def tare_ounces(v) -> int:
+    """A packaging preset's empty weight in whole ounces. Unlike an item, packaging can weigh
+    nothing worth counting (a sleeve, a poly bag): blank or 0 is 0. Partial ounces round up."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return 0
+    try:
+        f = float(v)
+    except (TypeError, ValueError) as exc:
+        raise InventoryError(f"empty weight must be a number of ounces, got {v!r}") from exc
+    if not math.isfinite(f) or f < 0:
+        raise InventoryError("empty weight can't be negative")
+    return 0 if f == 0 else weight_ounces(total_oz=f)
+
+
 def side_tenths(name: str, v) -> int | None:
     """One box side in tenths of an inch (one decimal kept, rounded half up). Blank = None."""
     if v is None or (isinstance(v, str) and not v.strip()):
@@ -1057,8 +1071,7 @@ class InventoryStore:
         sides = [side_tenths(k, data.get(k)) for k in ("length", "width", "height")]
         if any(v is None for v in sides) and not all(v is None for v in sides):
             raise InventoryError("give all three sides of the box, or none")
-        tare = data.get("tare_oz")
-        tare_oz = 0 if tare is None or (isinstance(tare, str) and not tare.strip()) else weight_ounces(total_oz=tare)
+        tare_oz = tare_ounces(data.get("tare_oz"))
         ts = now_iso()
         with self._tx() as con:
             if pid:
