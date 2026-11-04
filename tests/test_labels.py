@@ -229,4 +229,4 @@ def test_the_manifest_exempts_exactly_the_label_hop_from_the_host_auth_gate():
     import yaml
 
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "protoagent.plugin.yaml").read_text())
-    assert manifest["public_paths"] == ["/plugins/inventory/b/"]
+    assert manifest["public_paths"] == ["/plugins/inventory/b/", "/plugins/inventory/i/"]
