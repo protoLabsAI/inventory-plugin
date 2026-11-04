@@ -305,8 +305,10 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         """Build a printable page of labels: ``ids``, or ``unprinted``, or ``from``/``to``, or
         ``all`` for BINS; or ``items`` (a list of item ids, with an optional ``start_at`` 1–30)
         for item stickers on Avery 5160. Records them as printed (``mark``, default true) in the
-        same call."""
+        same call. ``link`` is a short-lived public address for the same sheet (see sheetlinks.py):
+        the view opens it so the sheet lands in a real browser, the desktop app's included."""
         from .labels import ITEM_LABELS_PER_SHEET, item_sheet_html, label_base, sheet_html
+        from .sheetlinks import SHEETS, sheet_link
 
         body = body or {}
         info = label_base(cfg)
@@ -339,12 +341,14 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
                     _raise(exc)
                 for i in ids:
                     emit("item.changed", {"id": i, "action": "labels"})
+            html = item_sheet_html(picked, info["base"], start_at=start_at)
             return {
                 "kind": "items",
                 "ids": ids,
                 "base": info["base"],
                 "phone_reachable": info["phone_reachable"],
-                "html": item_sheet_html(picked, info["base"], start_at=start_at),
+                "html": html,
+                "link": sheet_link(SHEETS.put(html)),
             }
         bins = sorted(store.list_bins()["bins"], key=lambda b: _bin_order(b["id"]))
         by_id = {b["id"]: b for b in bins}
@@ -377,11 +381,13 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             except InventoryError as exc:
                 _raise(exc)
             emit("bin.changed", {"ids": ids, "action": "labels"})
+        html = sheet_html(picked, info["base"])
         return {
             "ids": ids,
             "base": info["base"],
             "phone_reachable": info["phone_reachable"],
-            "html": sheet_html(picked, info["base"]),
+            "html": html,
+            "link": sheet_link(SHEETS.put(html)),
         }
 
     @r.get("/to-pack")

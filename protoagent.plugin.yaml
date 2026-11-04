@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.10.0
+version: 0.10.1
 description: >-
   The resale inventory as a source of truth: lots (what you bought and for how much),
   items (what each lot split into, its condition and status), listings (where each item is
@@ -60,6 +60,10 @@ public_paths:
   - /plugins/inventory/b/
   # The item-label hop (0.10.0, GET /plugins/inventory/i/<ITEM>): same contract and same reason.
   - /plugins/inventory/i/
+  # A printed-label sheet by its short-lived token (0.10.1, GET /plugins/inventory/sheet/<TOKEN>). The
+  # desktop app hands the sheet's link to the system browser, which carries no bearer: the 32-byte
+  # token (15 minutes) is the credential, and the sheet holds only what the printed labels show.
+  - /plugins/inventory/sheet/
 
 # Editable in Settings ▸ Plugins (ADR 0019).
 settings:

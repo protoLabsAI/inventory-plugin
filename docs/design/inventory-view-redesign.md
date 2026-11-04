@@ -506,7 +506,7 @@ Answers checked against core origin/main on 2026-11-02 (`inbox/inventory-glowup/
 |---|---|---|
 | 1 | Can a plugin start a one-off agent turn? | **Resolved: yes.** `sdk.run_in_session(session_id, prompt, job_id=…)` fires about 1s later. Photos go in through a tool returning `multimodal_tool_result`. The cron fallback is dropped (§3, §5). |
 | 2 | Does a console route open a rail view by URL and forward `?bin=`? | **Resolved: no**, so a small core change will add it. Labels encode `/plugins/inventory/b/<id>`. The no-core fallback is Bins ▸ Scan a label (§4). |
-| 3 | Do `window.print()` and long-press saving work in the frame? | **Resolved: print doesn't** (no `allow-modals`). The label sheet opens in a new tab (`allow-popups`). Long-press is unproven, so **Download photos** replaces it (§4, §5). |
+| 3 | Do `window.print()` and long-press saving work in the frame? | **Resolved: print doesn't** (no `allow-modals`). The label sheet opens in the operator's browser by a short-lived link (0.10.1): a new tab on the web, the system browser from the desktop app. Long-press is unproven, so **Download photos** replaces it (§4, §5). |
 | 5 | Normalize condition to `NoS`? | **Resolved:** a suggestion at entry only. Josh decides on existing rows. |
 | 6 | Where do the thresholds live? | **Resolved:** the stale-price and identification-confidence thresholds go in Settings. |
 

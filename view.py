@@ -19,6 +19,7 @@ from .labels import (
     older_host_page,
     view_target,
 )
+from .sheetlinks import SHEET_PREFIX
 
 VIEW_PATH = "/view"
 
@@ -898,6 +899,26 @@ PAGE = r"""<!doctype html>
   }
   const binOrder = (id) => { const m = /^B(\d+)$/.exec(id); return m ? [0, +m[1], ""] : [1, 0, id]; };
   const sortBins = (bins) => bins.slice().sort((a, b) => { const x = binOrder(a.id), y = binOrder(b.id); return x[0] - y[0] || x[1] - y[1] || (x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0); });
+  // Label sheets open in the operator's browser (0.10.1). The gated /labels/sheet route renders the
+  // sheet and hands back a short-lived public link to it. On the web a tab is opened inside the
+  // click (one opened after an await is a blocked popup) and pointed at the link once it exists. The
+  // desktop app ignores a blank window but hands an http(s) link to the system browser, so there the
+  // link itself is opened. Neither can report back reliably, so the dialog always keeps a real link:
+  // a fresh click on it works in every browser and in the desktop app.
+  function sheetTab() { try { return window.open("", "_blank"); } catch (_) { return null; } }
+  async function openSheet(w, r, n) {
+    const url = new URL(BASE + r.link, location.href).href, what = n + " label" + (n === 1 ? "" : "s");
+    let sent = false;
+    if (w) { try { w.opener = null; w.location.replace(url); sent = true; } catch (_) { sent = false; } }
+    if (!sent) { try { window.open(url, "_blank", "noopener"); } catch (_) { /* the link below still works */ } }
+    $("#dlg-result").innerHTML = '<div class="pl-callout pl-callout--info span2">Opening ' + esc(what) + " in your browser. Print from there, at 100% (Actual size). " +
+      'If nothing opened, <a href="' + esc(url) + '" target="_blank" rel="noopener" id="sheet-link">open the label sheet</a>. The link works for 15 minutes.</div>';
+    const ok = $("#dlg-ok"); if (ok) ok.remove();  // printed already: a second click would mark them twice (the kit's .pl-btn display beats [hidden])
+    const x = document.querySelector("#dialog-root [data-x]"); if (x) x.textContent = "Done";
+    toast("Opening " + what + " in your browser", "success");
+    await refresh();
+    return false;  // keep the dialog: its link is the fallback
+  }
   async function labelsDialog(only) {
     if (!state.bins.length) return toast("Make some bins first. Then print their labels.", "warning");
     let info;
@@ -913,23 +934,16 @@ PAGE = r"""<!doctype html>
     await dialog({
       title: only ? "Print the label for " + only : "Print bin labels", submit: "Open the sheet", body,
       onSubmit: async (v) => {
-        const w = window.open("", "_blank");  // before any await: a new tab needs the click itself
+        const w = sheetTab();  // before any await: on the web a new tab needs the click itself
         const req = only ? { ids: [only] } : v.mode === "range" ? { from: v.from, to: v.to } : v.mode === "all" ? { all: true } : { unprinted: true };
         let r;
         try { r = await api("/labels/sheet", "POST", req); } catch (e) { if (w) w.close(); throw e; }
-        const n = r.ids.length, what = n + " label" + (n === 1 ? "" : "s");
-        if (w) {
-          w.document.open(); w.document.write(r.html); w.document.close();
-          toast("Opened " + what + " in a new tab. Print from there.", "success"); await refresh(); return true;
-        }
-        const url = URL.createObjectURL(new Blob([r.html], { type: "text/html" }));
-        $("#dlg-result").innerHTML = '<div class="pl-callout pl-callout--warning span2">The browser blocked the new tab. <a href="' + url + '" target="_blank" rel="noopener">Open the sheet of ' + esc(what) + "</a> and print from there.</div>";
-        await refresh(); return false;
+        return openSheet(w, r, r.ids.length);
       },
     });
   }
-  // Item stickers on Avery 5160 (30 to a US Letter sheet). The sheet opens in a NEW tab: this
-  // frame has no allow-modals, so printing from inside it does nothing.
+  // Item stickers on Avery 5160 (30 to a US Letter sheet). The sheet opens in the operator's
+  // browser (see openSheet): this frame has no allow-modals, so printing from inside it does nothing.
   async function itemLabelsDialog(ids, title) {
     const list = [...new Set([...(ids || [])])].filter((id) => itemById(id));
     if (!list.length) return toast("Nothing to label: those items no longer exist.", "warning");
@@ -946,17 +960,10 @@ PAGE = r"""<!doctype html>
       onSubmit: async (v) => {
         const start = Math.round(Number(v.start || 1));
         if (!(start >= 1 && start <= 30)) { toast("Start at a label from 1 to 30", "warning"); return false; }
-        const w = window.open("", "_blank");  // before any await: a new tab needs the click itself
+        const w = sheetTab();  // before any await: on the web a new tab needs the click itself
         let r;
         try { r = await api("/labels/sheet", "POST", { items: list, start_at: start }); } catch (e) { if (w) w.close(); throw e; }
-        const what = r.ids.length + " label" + (r.ids.length === 1 ? "" : "s");
-        if (w) {
-          w.document.open(); w.document.write(r.html); w.document.close();
-          toast("Opened " + what + " in a new tab. Print from there.", "success"); await refresh(); return true;
-        }
-        const url = URL.createObjectURL(new Blob([r.html], { type: "text/html" }));
-        $("#dlg-result").innerHTML = '<div class="pl-callout pl-callout--warning span2">The browser blocked the new tab. <a href="' + url + '" target="_blank" rel="noopener">Open the sheet of ' + esc(what) + "</a> and print from there.</div>";
-        await refresh(); return false;
+        return openSheet(w, r, r.ids.length);
       },
     });
   }
@@ -1522,7 +1529,8 @@ PAGE = r"""<!doctype html>
 
 
 def build_view_router(cfg: dict):
-    """The PUBLIC router — mounted at ``/plugins/inventory``: the page, and the bin- and item-label hops."""
+    """The PUBLIC router — mounted at ``/plugins/inventory``: the page, the bin- and item-label hops,
+    and a printable label sheet by its short-lived token."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
 
@@ -1562,5 +1570,18 @@ def build_view_router(cfg: dict):
         if target:
             return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
         return HTMLResponse(older_host_item_page(iid, console_root()), headers={"Cache-Control": "no-store"})
+
+    # A printable label sheet (0.10.1), by the short-lived token the gated /labels/sheet minted.
+    # Public because the browser that opens it (the desktop app hands it to the system browser)
+    # carries no bearer; the 32-byte token is the credential, and the sheet holds only what the
+    # printed labels show. Unknown or expired: a short page with no data.
+    @r.get(SHEET_PREFIX + "/{token}", include_in_schema=False)
+    async def _sheet(token: str):
+        from .sheetlinks import SHEET_HEADERS, SHEETS, expired_page
+
+        html, expired = SHEETS.get(token)
+        if html is None:
+            return HTMLResponse(expired_page(), status_code=410 if expired else 404, headers=SHEET_HEADERS)
+        return HTMLResponse(html, headers=SHEET_HEADERS)
 
     return r
