@@ -183,7 +183,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], aging: [], agingSel: new Set(), agingAll: false, scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], aging: [], agingSel: new Set(), agingAll: false, scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, packaging: [], selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -245,6 +245,15 @@ PAGE = r"""<!doctype html>
   const daysOld = (d, now = Date.now()) => { if (!d) return Infinity; const t = Date.parse(d.length === 7 ? d + "-01" : d); return Number.isNaN(t) ? Infinity : (now - t) / 864e5; };
   const isStale = (i, now) => UNSOLD.includes(i.status) && i.target != null && daysOld(i.price_updated_on, now) > STALE_DAYS;
   const readyToList = (items) => items.filter((i) => i.status === "available" && i.target != null);
+  // ── shipping (0.15.0): the weight is whole ounces as weighed; the packaging's own weight is
+  // added for the packed weight. eBay asks for pounds + ounces and inches, so that's the format.
+  const lbOz = (oz) => ({ lb: Math.floor(oz / 16), oz: oz % 16 });
+  const weightText = (oz) => { if (oz == null) return ""; const w = lbOz(oz); return (w.lb ? w.lb + " lb" : "") + (w.lb && w.oz ? " " : "") + (w.oz || !w.lb ? w.oz + " oz" : ""); };
+  const inch = (v) => String(Math.round(Number(v) * 10) / 10);
+  const boxText = (b) => (b ? inch(b.length) + " × " + inch(b.width) + " × " + inch(b.height) + " in" : "");
+  const packagingById = (id) => (id ? state.packaging.find((p) => p.id === id) : null) || null;
+  const packedOz = (i) => (i.weight_oz == null ? null : i.weight_oz + ((packagingById(i.packaging_id) || {}).tare_oz || 0));
+  const noWeight = (i) => ["available", "listed", "pending"].includes(i.status) && i.weight_oz == null;
   function stockItems(items, f, now) {
     const seg = LIFECYCLE.find(([k]) => k === f.seg) || LIFECYCLE[0];
     const q = clean(f.q).toLowerCase();
@@ -252,6 +261,8 @@ PAGE = r"""<!doctype html>
       if (f.preset === "ready" && !(i.status === "available" && i.target != null)) return false;
       if (f.preset === "stale" && !isStale(i, now)) return false;
       if (f.preset === "nobin" && !(UNSOLD.includes(i.status) && !i.bin_id)) return false;
+      if (f.preset === "noweight" && !noWeight(i)) return false;
+      if (f.preset === "missing" && !i.missing_since) return false;
       if (!f.preset && seg[2] && !seg[2].includes(i.status)) return false;
       if (f.system && clean(i.system) !== f.system) return false;
       if (f.lot && i.lot_id !== f.lot) return false;
@@ -424,7 +435,7 @@ PAGE = r"""<!doctype html>
   const forSale = (i) => ["available", "listed", "pending"].includes(i.status);
   function binBody(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
-    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + '<div class="drow muted">' + (b.labels_printed_on ? "Label printed " + esc(b.labels_printed_on) : "No label printed yet") + "</div></div>";
+    let h = '<div class="dsec"><div class="drow"><span>' + xs.length + " item" + (xs.length === 1 ? "" : "s") + '</span><span class="muted">· ' + esc(whole(b.value_at_target)) + " unsold at target</span></div>" + (b.note ? '<p class="basis notes">' + esc(b.note) + "</p>" : "") + '<div class="drow muted">' + (b.labels_printed_on ? "Label printed " + esc(b.labels_printed_on) : "No label printed yet") + " · " + (b.checked_on ? esc(sinceText(b.checked_on)) : "never checked") + "</div></div>";
     if (!xs.length) return h + '<div class="dsec"><div class="pl-empty"><div class="pl-empty__title">Nothing in ' + esc(b.id) + ' yet</div><div class="pl-empty__desc">Move items here to record that they live in this bin.</div></div></div>';
     for (const [sys, its] of bySystem(xs)) h += '<div class="dsec"><h3 class="dh">' + esc(sys) + ' <span class="muted">' + its.length + '</span></h3><ul class="list">' + its.map((i) => "<li>" + itemButton(i, [clean(i.condition), (STATUS_LABEL[i.status] || [i.status])[0]].filter(Boolean).join(" · ")) + "</li>").join("") + "</ul></div>";
     return h;
@@ -432,7 +443,7 @@ PAGE = r"""<!doctype html>
   function binFoot(b) {
     const xs = state.items.filter((i) => i.bin_id === b.id);
     const btn = (act, label, primary = false) => '<button class="pl-btn' + (primary ? " pl-btn--primary" : "") + '" data-act="' + act + '" data-id="' + esc(b.id) + '">' + label + "</button>";
-    return btn("movehere", "Move items here", true) + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
+    return btn("movehere", "Move items here", true) + btn("bincheck", "Check this bin") + (xs.some(forSale) ? btn("copybin", "Copy list") : "") + (xs.length ? btn("binstock", "Select in Stock") : "") + btn("printlabel", "Print label") + btn("editbin", "Edit bin") + (xs.length ? "" : '<button class="pl-btn pl-btn--danger" data-act="delbin" data-id="' + esc(b.id) + '">Delete bin</button>');
   }
 
   // ── listing drafts: written by an agent turn, copied by you, listed by you ─────────
@@ -443,6 +454,18 @@ PAGE = r"""<!doctype html>
   const draftLabel = (d) => (!d || d.listing_state === "none" ? "no draft yet" : (LSTATE[d.listing_state] || [d.listing_state])[0]);
   const draftable = (it) => ["planned", "available"].includes(it.status);
   const cpRow = (k, label, text, extra = "") => '<div class="cprow"><div class="irow-main"><span class="pl-field__label">' + esc(label) + '</span><span class="cptext' + (k === "description" ? " pre" : "") + '">' + esc(text) + "</span>" + extra + '</div><button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="' + k + '">Copy ' + esc(label.toLowerCase()) + "</button></div>";
+  // eBay's package fields: weight as pounds + ounces, size as length × width × height in inches.
+  // Copied one number at a time, the way eBay's form takes them. Nothing here is guessed.
+  function shipRows(it) {
+    const oz = packedOz(it), cp = (k, label) => '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="' + k + '">' + esc(label) + "</button>";
+    const wrow = oz == null
+      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="irow-sub">Not weighed yet.</span></div><button class="pl-btn pl-btn--sm tall" data-act="shipping" data-id="' + esc(it.id) + '">Weigh &amp; box</button></div>'
+      : '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package weight</span><span class="cptext">' + esc(weightText(oz)) + '</span><span class="irow-sub">' + esc(packagingById(it.packaging_id) && packagingById(it.packaging_id).tare_oz ? "Includes " + packagingById(it.packaging_id).name + " (" + weightText(packagingById(it.packaging_id).tare_oz) + ")" : "As weighed") + '</span></div><span class="row-acts">' + cp("wlb", "Copy lb") + cp("woz", "Copy oz") + "</span></div>";
+    const brow = it.box
+      ? '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Package size</span><span class="cptext">' + esc(boxText(it.box)) + '</span></div><span class="row-acts">' + cp("bl", "Copy L") + cp("bw", "Copy W") + cp("bh", "Copy H") + "</span></div>"
+      : "";
+    return wrow + brow;
+  }
   function draftBody(it, d) {
     // Kept, withdrawn or sold stock gets no new draft; a live one still shows its listing.
     if (!draftable(it) && !(d && d.state === "live")) return "";
@@ -460,6 +483,7 @@ PAGE = r"""<!doctype html>
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Price</span><span class="money">' + esc(fmt(it.target)) + '</span><span class="irow-sub">' + esc(it.price_basis ? "Basis: " + clip(it.price_basis, 140) : "No basis recorded") + '</span><span class="irow-sub">Change it with Set price.</span></div>' + '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="price">Copy price</button></div>' +
       cpRow("description", "Description", d.description) +
       cpRow("sku", "Custom label (SKU)", d.sku, '<span class="irow-sub">Bin first, so eBay\'s pick list says where it lives. Paste it into Custom label.</span>') +
+      shipRows(it) +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Photos</span><span class="irow-sub">' + (nPhotos ? nPhotos + " photo" + (nPhotos === 1 ? "" : "s") + ", metadata stripped, cover first" : "No photos from a scan") + "</span></div>" + (nPhotos ? '<button class="pl-btn pl-btn--sm tall" data-act="dphotos" data-id="' + esc(it.id) + '">Download photos</button>' : "") + "</div>" +
       (d.notes ? '<p class="basis notes muted">' + esc(d.notes) + "</p>" : "") +
       '<div class="drow gap-t">' + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="dlive" data-id="' + esc(it.id) + '">I listed it</button>' + ask("Regenerate", "redraft") + "</div>" +
@@ -488,6 +512,13 @@ PAGE = r"""<!doctype html>
   async function copyDraft(btn) {
     const d = state.openDraft; const it = d && state.items.find((i) => i.id === d.item_id); if (!d || !it) return;
     const k = btn.dataset.k;
+    const SHIP = { wlb: () => String(lbOz(packedOz(it)).lb), woz: () => String(lbOz(packedOz(it)).oz), bl: () => inch(it.box.length), bw: () => inch(it.box.width), bh: () => inch(it.box.height) };
+    if (SHIP[k]) {  // a package number: copy it, the draft's state doesn't change
+      if ((k[0] === "w" && packedOz(it) == null) || (k[0] === "b" && !it.box)) return;
+      if (!(await copyText(SHIP[k]()))) return toast("Couldn't copy here. Select the text and copy it.", "warning");
+      const was = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { if (btn.isConnected) btn.textContent = was; }, 2000);
+      return;
+    }
     const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : k === "sku" ? d.sku : d.description;
     const ok = await copyText(text);
     if (!ok) return toast("Couldn't copy here. Select the text and copy it.", "warning");
@@ -524,10 +555,18 @@ PAGE = r"""<!doctype html>
     if (ok) await refresh();
   }
 
+  function shipSummary(it) {
+    const pk = packagingById(it.packaging_id), parts = [];
+    if (it.weight_oz != null) parts.push(weightText(packedOz(it)) + (pk && pk.tare_oz ? " packed" : ""));
+    if (it.box) parts.push(boxText(it.box));
+    if (pk) parts.push(pk.name);
+    return parts.length ? "<span>" + esc(parts.join(" · ")) + "</span>" : '<span class="muted">Not weighed</span>';
+  }
   function itemBody(it, audit, draft = null) {
     const live = (it.listings || []).filter((l) => l.state === "active" || l.state === "needs_end");
     const obs = (it.observations || [])[0];
     let h = '<div class="dsec"><div class="drow">' + badge(it.status) + (it.quantity > 1 ? '<span class="muted">×' + esc(it.quantity) + "</span>" : "") + (isStale(it) ? staleBadge : "") + "</div>";
+    if (it.missing_since) h += '<div class="pl-callout pl-callout--warning gap-t"><div class="pl-callout__body">Missing from ' + esc(it.bin_id || "its bin") + " since a check on " + esc(it.missing_since) + '. <button class="pl-btn pl-btn--sm" data-act="found" data-id="' + esc(it.id) + '">Found it</button></div></div>';
     if (it.status === "sold") {
       h += (it.sales || []).map((s) => '<div class="kv"><span class="muted">' + esc(s.sold_on) + "</span><span>" + esc(s.channel) + " · sold " + whole(s.price) + ", net " + whole(s.net) + "</span></div>").join("");
     }
@@ -547,6 +586,7 @@ PAGE = r"""<!doctype html>
       kv("Label", (it.labels_printed_on ? '<span>Printed ' + esc(it.labels_printed_on) + "</span>" : '<span class="muted">Never printed</span>') +
         ' <button class="pl-btn pl-btn--sm" data-act="itemlabel" data-id="' + esc(it.id) + '">Print label</button>' +
         (UNSOLD.includes(it.status) ? ' <button class="pl-btn pl-btn--sm" data-act="pa-add" data-id="' + esc(it.id) + '">' + (PA.ids.includes(it.id) ? "In put away" : "Add to put away") + "</button>" : "")) +
+      kv("Shipping", shipSummary(it) + ' <button class="pl-btn pl-btn--sm" data-act="shipping" data-id="' + esc(it.id) + '">' + (it.weight_oz == null && !it.box ? "Weigh &amp; box" : "Edit") + "</button>") +
       kv("System", esc(it.system) || '<span class="muted">—</span>') +
       kv("Condition", esc(it.condition) || '<span class="muted">—</span>') +
       kv("Category", esc(it.category) || '<span class="muted">—</span>') +
@@ -602,7 +642,7 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes, aging] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] })), api("/aging").catch(() => ({ items: [] }))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes, aging, packaging] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] })), api("/aging").catch(() => ({ items: [] })), api("/packaging").catch(() => ({ packaging: [] }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
@@ -611,6 +651,7 @@ PAGE = r"""<!doctype html>
     state.toEnd = (toEnd && toEnd.listings) || [];
     state.pastes = (pastes && pastes.pastes) || [];
     state.aging = (aging && aging.items) || [];
+    state.packaging = (packaging && packaging.packaging) || [];
     for (const id of [...state.agingSel]) if (!state.aging.some((a) => a.item_id === id)) state.agingSel.delete(id);
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
@@ -646,6 +687,7 @@ PAGE = r"""<!doctype html>
       else if (d && d.kind === "history") openHistory();
       else if (d && d.kind === "scan") scPaint();
       else if (d && d.kind === "putaway") paPaint();
+      else if (d && d.kind === "bincheck") bcPaint();
       else if (d && d.kind === "paste") pastePaint();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
@@ -756,6 +798,10 @@ PAGE = r"""<!doctype html>
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
+    const missing = items.filter((i) => i.missing_since).length;
+    if (missing) chores.push('<li><button class="irow" data-see="missing"><span class="irow-main">' + missing + " item" + (missing === 1 ? " is" : "s are") + ' missing from their bin</span><span class="muted">See them</span></button></li>');
+    const unweighed = items.filter(noWeight).length;
+    if (unweighed) chores.push('<li><button class="irow" data-see="noweight"><span class="irow-main">' + unweighed + " for-sale item" + (unweighed === 1 ? " has" : "s have") + ' no packed weight</span><span class="muted">Weigh them</span></button></li>');
     if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
     return h.indexOf('class="sec"') >= 0 ? h : h + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
@@ -765,6 +811,8 @@ PAGE = r"""<!doctype html>
     if (f.preset === "ready") chips.push(["preset", "Ready to list"]);
     if (f.preset === "stale") chips.push(["preset", "Stale price"]);
     if (f.preset === "nobin") chips.push(["preset", "Not in a bin"]);
+    if (f.preset === "noweight") chips.push(["preset", "No packed weight"]);
+    if (f.preset === "missing") chips.push(["preset", "Missing"]);
     if (f.bin) chips.push(["bin", f.bin === "-" ? "No bin" : "Bin " + binText(f.bin)]);
     if (f.system) chips.push(["system", f.system]);
     if (f.lot) chips.push(["lot", lotName(f.lot)]);
@@ -849,7 +897,7 @@ PAGE = r"""<!doctype html>
   }
   function renderBins() {
     if (!state.bins.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Number your boxes or shelves B01, B02 … and record what lives where. ' + (state.unbinned ? state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + " no location yet." : "") + '</div><div class="pl-empty__action"><button class="pl-btn pl-btn--primary" data-act="newbins">Create bins</button></div></div>';
-    const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
+    const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + (b.checked_on ? " · " + esc(sinceText(b.checked_on)) : "") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
     const loose = state.unbinned ? '<ul class="list note"><li><button class="irow" data-see="nobin"><span class="irow-main"><span class="irow-name">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? "" : "s") + ' not in a bin</span><span class="irow-sub">Open them in Stock and move them</span></span></button></li></ul>' : "";
     return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><span class="row-acts"><button class="pl-btn pl-btn--sm pl-btn--primary" data-act="putaway">Put away</button><button class="pl-btn pl-btn--sm" data-act="printlabels">Print labels</button><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></span></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
   }
@@ -1007,6 +1055,30 @@ PAGE = r"""<!doctype html>
     await refresh();
     return false;  // keep the dialog: its link is the fallback
   }
+  // ── label stock (0.15.0): Avery sheets or a thermal roll. The last pick per kind (bins, items)
+  // is remembered in this browser's localStorage, not in Settings: it's which printer is beside
+  // you, not how the agent behaves.
+  const STOCK_KEY = (kind) => "inventory.labelstock." + kind;
+  function lastStock(kind, info) {
+    const ok = ((info.stocks || {})[kind] || []).map((s) => s.id);
+    let v = ""; try { v = localStorage.getItem(STOCK_KEY(kind)) || ""; } catch (_) { v = ""; }
+    return ok.includes(v) ? v : (info.default_stock || {})[kind] || ok[0] || "";
+  }
+  function keepStock(kind, v) { try { localStorage.setItem(STOCK_KEY(kind), v); } catch (_) { /* this browser won't remember */ } }
+  const stockOf = (info, kind, id) => ((info.stocks || {})[kind] || []).find((s) => s.id === id) || { id, per_sheet: 1, roll: true };
+  const skips = (st) => !st.roll && st.per_sheet > 1 && st.id !== "bins12";
+  function stockField(kind, info) {
+    const list = (info.stocks || {})[kind] || [];
+    return list.length ? field("stock", "Label stock", lastStock(kind, info), { type: "select", span2: true, options: list.map((s) => [s.id, s.name]), hint: "A roll prints one label per page: pick your label printer and its label size in the print dialog." }) : "";
+  }
+  function startField(kind, info) {
+    const st = stockOf(info, kind, lastStock(kind, info));
+    return '<div id="start-wrap" class="span2"' + (skips(st) ? "" : " hidden") + ">" + field("start", "Start at label", 1, { type: "number", step: "1", hint: "On a partly used sheet, the first free label: 1 is top left, counting across. Only the first sheet skips." }) + "</div>";
+  }
+  function wireStock(kind, info) {
+    const sel = $("#f_stock"), wrap = $("#start-wrap"); if (!sel || !wrap) return;
+    sel.addEventListener("change", () => { wrap.hidden = !skips(stockOf(info, kind, sel.value)); });
+  }
   async function labelsDialog(only) {
     if (!state.bins.length) return toast("Make some bins first. Then print their labels.", "warning");
     let info;
@@ -1016,19 +1088,24 @@ PAGE = r"""<!doctype html>
     const unprinted = state.bins.filter((b) => !b.labels_printed_on).length;
     const where = '<div class="span2 muted">Each label opens ' + esc(info.base + info.path) + "&lt;bin&gt;." +
       (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + "</div>";
-    const body = only ? '<div class="span2">One label for bin ' + esc(only) + ".</div>" + where :
+    const body = (only ? '<div class="span2">One label for bin ' + esc(only) + ".</div>" :
       field("mode", "Which labels", unprinted ? "unprinted" : "all", { type: "select", options: [["unprinted", "Bins without a printed label (" + unprinted + ")"], ["range", "A range of bins"], ["all", "All bins (" + ids.length + ")"]] }) +
-      field("from", "From", ids[0], { type: "select", options: ids, hint: "Only used for a range." }) + field("to", "To", ids[ids.length - 1], { type: "select", options: ids }) + where;
-    await dialog({
+      field("from", "From", ids[0], { type: "select", options: ids, hint: "Only used for a range." }) + field("to", "To", ids[ids.length - 1], { type: "select", options: ids })) + stockField("bins", info) + startField("bins", info) + where;
+    const shown = dialog({
       title: only ? "Print the label for " + only : "Print bin labels", submit: "Open the sheet", body,
       onSubmit: async (v) => {
         const w = sheetTab();  // before any await: on the web a new tab needs the click itself
         const req = only ? { ids: [only] } : v.mode === "range" ? { from: v.from, to: v.to } : v.mode === "all" ? { all: true } : { unprinted: true };
+        const st = stockOf(info, "bins", v.stock || lastStock("bins", info));
+        if (v.stock) { req.stock = v.stock; keepStock("bins", v.stock); }
+        if (skips(st)) { const start = Math.round(Number(v.start || 1)); if (!(start >= 1 && start <= st.per_sheet)) { if (w) w.close(); toast("Start at a label from 1 to " + st.per_sheet, "warning"); return false; } req.start_at = start; }
         let r;
         try { r = await api("/labels/sheet", "POST", req); } catch (e) { if (w) w.close(); throw e; }
         return openSheet(w, r, r.ids.length);
       },
     });
+    wireStock("bins", info);
+    return shown;
   }
   // Item stickers on Avery 5160 (30 to a US Letter sheet). The sheet opens in the operator's
   // browser (see openSheet): this frame has no allow-modals, so printing from inside it does nothing.
@@ -1038,22 +1115,26 @@ PAGE = r"""<!doctype html>
     let info;
     try { info = await api("/labels/base"); } catch (e) { return toast(e.message, "error"); }
     if (!info.base) return toast(info.problem, "error");
-    const n = list.length, sheets = Math.ceil(n / 30);
-    const where = '<div class="span2 muted">' + n + " label" + (n === 1 ? "" : "s") + " on Avery 5160 (30 to a sheet). Each opens its item at " + esc(info.base) + "/plugins/inventory/i/&lt;item&gt;." +
+    const n = list.length;
+    const where = '<div class="span2 muted">' + n + " label" + (n === 1 ? "" : "s") + ". Each opens its item at " + esc(info.base) + "/plugins/inventory/i/&lt;item&gt;." +
       (info.phone_reachable ? "" : " That address only works on this computer, so a phone can't open it. Set Bin label address in Settings.") + " Print at 100% (Actual size), not Fit to page.</div>";
-    await dialog({
+    const shown = dialog({
       title: title || (n === 1 ? "Print a label for " + (itemById(list[0]).name || list[0]) : "Print " + n + " item labels"),
       submit: "Open the sheet",
-      body: field("start", "Start at label", 1, { type: "number", step: "1", hint: "On a partly used sheet, the first free label: 1 is top left, 30 is bottom right, counting across. Only the first sheet" + (sheets > 1 ? " of " + sheets : "") + " skips." }) + where,
+      body: stockField("items", info) + startField("items", info) + where,
       onSubmit: async (v) => {
-        const start = Math.round(Number(v.start || 1));
-        if (!(start >= 1 && start <= 30)) { toast("Start at a label from 1 to 30", "warning"); return false; }
+        const stock = v.stock || lastStock("items", info), st = stockOf(info, "items", stock);
+        const start = skips(st) ? Math.round(Number(v.start || 1)) : 1;
+        if (!(start >= 1 && start <= st.per_sheet)) { toast("Start at a label from 1 to " + st.per_sheet, "warning"); return false; }
         const w = sheetTab();  // before any await: on the web a new tab needs the click itself
+        keepStock("items", stock);
         let r;
-        try { r = await api("/labels/sheet", "POST", { items: list, start_at: start }); } catch (e) { if (w) w.close(); throw e; }
+        try { r = await api("/labels/sheet", "POST", { items: list, start_at: start, stock }); } catch (e) { if (w) w.close(); throw e; }
         return openSheet(w, r, r.ids.length);
       },
     });
+    wireStock("items", info);
+    return shown;
   }
   async function newBinsDialog() {
     const first = !state.bins.length;
@@ -1097,6 +1178,68 @@ PAGE = r"""<!doctype html>
         await refresh();
       },
     });
+  }
+  // ── shipping + packaging dialogs (0.15.0) ─────────────────────────────────────────────
+  const pkLabel = (p) => p.name + (p.box ? " — " + boxText(p.box) : "") + (p.tare_oz ? ", " + weightText(p.tare_oz) : "");
+  async function shippingDialog(id) {
+    const it = itemById(id); if (!it) return;
+    const w = it.weight_oz == null ? null : lbOz(it.weight_oz), b = it.box || {};
+    const opts = [["", "None: weigh it as it ships"]].concat(state.packaging.map((p) => [p.id, pkLabel(p)]));
+    const shown = dialog({
+      title: "Shipping: " + it.name, submit: "Save",
+      body: field("pk", "Packaging", it.packaging_id || "", { type: "select", options: opts, span2: true, hint: state.packaging.length ? "Its box fills in below, and its own weight is added for the packed weight." : "No packaging saved yet. Add your boxes and mailers from More ▸ Packaging." }) +
+        field("lb", "Weight: lb", w ? w.lb : "", { type: "number", step: "1", inputmode: "numeric" }) + field("oz", "oz", w ? w.oz : "", { type: "number", step: "0.1", inputmode: "decimal", hint: "With packaging picked, weigh the item alone. Partial ounces round up." }) +
+        field("l", "Length (in)", b.length ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("w", "Width (in)", b.width ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        field("h", "Height (in)", b.height ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        '<div class="span2 muted">Leave anything you haven\'t measured blank: nothing here is guessed.</div>',
+      onSubmit: async (v) => {
+        const body = { packaging_id: v.pk || "" };
+        const wBlank = !String(v.lb).trim() && !String(v.oz).trim();
+        if (!wBlank) Object.assign(body, { weight_lb: v.lb, weight_oz: v.oz });
+        else if (it.weight_oz != null) body.weight_total_oz = null;
+        const sides = [v.l, v.w, v.h].map((x) => String(x).trim());
+        if (sides.some(Boolean)) Object.assign(body, { length: sides[0], width: sides[1], height: sides[2] });
+        else if (!v.pk && it.box) Object.assign(body, { length: null, width: null, height: null });
+        await api("/items/" + encodeURIComponent(id) + "/shipping", "PUT", body);
+        toast("Shipping saved", "success"); await refresh();
+        if (state.drawer && state.drawer.kind === "putaway") paPaint();
+      },
+    });
+    const sel = $("#f_pk");
+    if (sel) sel.addEventListener("change", () => {
+      const pk = packagingById(sel.value); if (!pk || !pk.box) return;
+      [["l", "length"], ["w", "width"], ["h", "height"]].forEach(([f, k]) => { const el = $("#f_" + f); if (el) el.value = inch(pk.box[k]); });
+    });
+    return shown;
+  }
+  async function packagingDialog() {
+    const rows = state.packaging.map((p) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(p.name) + '</span><span class="irow-sub">' + esc([p.box ? boxText(p.box) : "no size", p.tare_oz ? weightText(p.tare_oz) + " empty" : "", p.items ? p.items + " item" + (p.items === 1 ? "" : "s") : ""].filter(Boolean).join(" · ")) + '</span></div><button type="button" class="pl-btn pl-btn--sm" data-act="pk-edit" data-id="' + esc(p.id) + '">Edit</button>' + (p.items ? "" : '<button type="button" class="pl-btn pl-btn--sm pl-btn--ghost" data-act="pk-del" data-id="' + esc(p.id) + '">Delete</button>') + "</li>").join("");
+    await dialog({
+      title: "Packaging",
+      body: '<div class="span2">' + (rows ? '<ul class="list">' + rows + "</ul>" : '<p class="muted">No packaging yet. Add the boxes and mailers you actually ship in, with their size and empty weight.</p>') + "</div>" +
+        '<div class="span2 drow"><button type="button" class="pl-btn pl-btn--primary" data-act="pk-new">Add packaging</button></div>',
+    });
+  }
+  async function pkEditDialog(id) {
+    const pk = id ? packagingById(id) : null, b = (pk && pk.box) || {};
+    await dialog({
+      title: pk ? "Edit " + pk.name : "Add packaging", submit: pk ? "Save" : "Add",
+      body: field("name", "Name", pk ? pk.name : "", { required: true, span2: true, placeholder: "Small flat rate box, 6×9 bubble mailer…" }) +
+        field("l", "Length (in)", b.length ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("w", "Width (in)", b.width ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) +
+        field("h", "Height (in)", b.height ?? "", { type: "number", step: "0.1", inputmode: "decimal" }) + field("tare", "Empty weight (oz)", pk ? pk.tare_oz : "", { type: "number", step: "0.1", inputmode: "decimal", hint: "Weigh it empty, with its padding. Blank = 0." }),
+      onSubmit: async (v) => {
+        const body = { name: v.name, length: v.l, width: v.w, height: v.h, tare_oz: v.tare };
+        if (pk) await api("/packaging/" + encodeURIComponent(pk.id), "PUT", body); else await api("/packaging", "POST", body);
+        toast(pk ? "Saved" : "Packaging added", "success"); await refresh();
+        setTimeout(packagingDialog, 0);
+      },
+    });
+  }
+  async function pkDelete(id) {
+    const pk = packagingById(id); if (!pk) return;
+    if (!(await confirm("Delete " + pk.name + "?", "Items keep their weight and box; nothing ships in it any more.", "Delete"))) return packagingDialog();
+    try { await api("/packaging/" + encodeURIComponent(id), "DELETE"); toast("Deleted", "success"); } catch (e) { toast(e.message, "error"); }
+    await refresh(); packagingDialog();
   }
   function startMove(id) {
     state.moveTo = id; state.selected.clear();
@@ -1716,7 +1859,7 @@ PAGE = r"""<!doctype html>
       return !(fp && typeof fp.allowsFeature === "function" && fp.allowsFeature("camera") === false);
     } catch (_) { return false; }
   }
-  const CAM = { on: false, stream: null, track: null, el: null, video: null, canvas: null, g: null, raf: 0, last: 0, frames: 0, seen: new Map(), lastHit: 0, idle: 0, paused: false, idled: false, audio: null, torch: false, torchOn: false, error: "", unavailable: false };
+  const CAM = { ctx: "putaway", on: false, stream: null, track: null, el: null, video: null, canvas: null, g: null, raf: 0, last: 0, frames: 0, seen: new Map(), lastHit: 0, idle: 0, paused: false, idled: false, audio: null, torch: false, torchOn: false, error: "", unavailable: false };
   function camBeep() {
     const a = CAM.audio; if (!a) return;
     try {
@@ -1744,8 +1887,11 @@ PAGE = r"""<!doctype html>
     slot.appendChild(CAM.el);
     if (CAM.video && CAM.video.paused && CAM.on) CAM.video.play().catch(() => {});
   }
+  // The viewfinder serves two drawers: Put away, and a bin check (0.15.0). Whichever is open owns it.
+  const camRepaint = () => (CAM.ctx === "bincheck" ? bcPaint() : paPaint());
   async function camStart() {
     if (CAM.on) return;
+    CAM.ctx = state.drawer && state.drawer.kind === "bincheck" ? "bincheck" : "putaway";
     CAM.error = ""; CAM.idled = false;
     try {  // the AudioContext must be made inside this tap, or iOS keeps it muted
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -1759,20 +1905,20 @@ PAGE = r"""<!doctype html>
       const name = (e && e.name) || "";
       if (name === "NotAllowedError") CAM.error = "Camera permission was refused. Allow it in Settings ▸ Safari ▸ Camera, or take a photo instead.";
       else { CAM.unavailable = true; CAM.error = "The live camera isn't available here, so take a photo of the label instead."; }
-      return paPaint();
+      return camRepaint();
     }
-    if (!state.drawer || state.drawer.kind !== "putaway") { stream.getTracks().forEach((t) => t.stop()); return; }
+    if (!state.drawer || state.drawer.kind !== CAM.ctx) { stream.getTracks().forEach((t) => t.stop()); return; }
     if (!CAM.el) camBuild();
     CAM.stream = stream; CAM.track = stream.getVideoTracks()[0] || null;
     try { CAM.torch = !!(CAM.track && CAM.track.getCapabilities && CAM.track.getCapabilities().torch); } catch (_) { CAM.torch = false; }
     CAM.torchOn = false; CAM.video.srcObject = stream; CAM.on = true; CAM.paused = false; CAM.seen.clear(); CAM.frames = 0; CAM.last = 0;
     CAM.lastHit = Date.now();
-    paPaint();
+    camRepaint();
     CAM.video.play().catch(() => {});
     CAM.raf = requestAnimationFrame(camTick);
     clearInterval(CAM.idle);
-    CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; paPaint(); } }, 5000);
-    paSay("Camera on. Point it at a label.");
+    CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; camRepaint(); } }, 5000);
+    (CAM.ctx === "bincheck" ? bcSay : paSay)("Camera on. Point it at a label.");
   }
   function camStop() {
     cancelAnimationFrame(CAM.raf); CAM.raf = 0; clearInterval(CAM.idle); CAM.idle = 0;
@@ -1797,6 +1943,7 @@ PAGE = r"""<!doctype html>
     const now = Date.now();
     if (!camFresh(CAM.seen, text, now)) return;
     CAM.lastHit = now;
+    if (CAM.ctx === "bincheck") { if (bcApply(parseLabel(text), text)) { camBeep(); camFlash(); } return; }
     const lab = parseLabel(text);
     if (!lab) { PA.note = "That QR code isn't an Inventory label."; return paPaint(); }
     if (lab.kind === "item") {
@@ -1825,7 +1972,7 @@ PAGE = r"""<!doctype html>
   async function camTorch() {
     if (!CAM.track || !CAM.torch) return;
     try { await CAM.track.applyConstraints({ advanced: [{ torch: !CAM.torchOn }] }); CAM.torchOn = !CAM.torchOn; } catch (_) { CAM.torch = false; }
-    paPaint();
+    camRepaint();
   }
   function openPutAway() { ++drawerSeq; state.drawer = { kind: "putaway" }; PA.note = ""; paPaint(); }
   function paPaint() {
@@ -1833,8 +1980,8 @@ PAGE = r"""<!doctype html>
     PA.ids = PA.ids.filter((id) => { const it = itemById(id); return it && it.status !== "sold"; }); saveTray();
     const rows = PA.ids.map((id) => {
       const it = itemById(id);
-      return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(it.name) + '</span><span class="irow-sub">' + esc([it.condition, it.bin_id ? "now in " + binText(it.bin_id) : "not in a bin"].filter(Boolean).join(" · ")) +
-        '</span></div><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
+      return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(it.name) + '</span><span class="irow-sub">' + esc([it.condition, it.bin_id ? "now in " + binText(it.bin_id) : "not in a bin", it.weight_oz == null ? "" : weightText(packedOz(it))].filter(Boolean).join(" · ")) +
+        '</span></div><button class="pl-btn pl-btn--sm tall" data-act="shipping" data-id="' + esc(id) + '" aria-label="Weigh and box ' + esc(it.name) + '">' + (it.weight_oz == null ? "Weigh" : "Weight") + '</button><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
     }).join("");
     const n = PA.ids.length;
     const live = camSupported() && !CAM.unavailable;
@@ -1906,14 +2053,122 @@ PAGE = r"""<!doctype html>
     "pa-clear": () => { PA.ids = []; saveTray(); PA.note = ""; paPaint(); },
     "pa-type": () => { const el = $("#f_pa_id"); const lab = parseTyped(el ? el.value : ""); if (!lab) return toast("Type an item id or a bin id", "warning"); return paApply(lab); },
     "pa-cam": () => camStart(),
-    "pa-camstop": () => { camStop(); CAM.idled = false; paPaint(); },
+    "pa-camstop": () => { camStop(); CAM.idled = false; camRepaint(); },
     "pa-torch": () => camTorch(),
   };
 
+  // ── check a bin (0.15.0): scan every label in it, see what's there, missing or astray ──────
+  const BC = { bin: "", found: new Set(), strays: new Map(), unknown: [], note: "", busy: false };
+  const bcSay = (t) => { const l = $("#bc-live"); if (l) l.textContent = t; };
+  // What one scanned label means for the bin being checked. Pure: unit-tested under node.
+  function bcClassify(lab, bin, items) {
+    if (!lab) return { kind: "foreign" };
+    if (lab.kind === "bin") return { kind: lab.id === bin ? "thisbin" : "otherbin", id: lab.id };
+    const it = items.find((i) => i.id === lab.id) || items.find((i) => i.id.toLowerCase() === String(lab.id).toLowerCase());
+    if (!it) return { kind: "unknown", id: lab.id };
+    if (it.bin_id === bin) return { kind: "found", id: it.id };
+    if (it.status === "sold" && !it.bin_id) return { kind: "sold", id: it.id };
+    return { kind: it.bin_id ? "elsewhere" : "loose", id: it.id, from: it.bin_id || "" };
+  }
+  function openCheck(bin) {
+    if (!binById(bin)) return toast("Bin " + bin + " no longer exists", "warning");
+    ++drawerSeq; state.drawer = { kind: "bincheck", id: bin };
+    Object.assign(BC, { bin, found: new Set(), strays: new Map(), unknown: [], note: "", busy: false });
+    bcPaint();
+  }
+  // Returns true when the label added something new (for the beep).
+  function bcApply(lab, raw = "") {
+    const c = bcClassify(lab, BC.bin, state.items);
+    let fresh = false;
+    if (c.kind === "found") { fresh = !BC.found.has(c.id); BC.found.add(c.id); BC.note = ""; if (fresh) bcSay("Found " + (itemById(c.id) || {}).name); }
+    else if (["elsewhere", "loose", "sold"].includes(c.kind)) { fresh = !BC.strays.has(c.id); BC.strays.set(c.id, c); BC.note = ""; if (fresh) bcSay((itemById(c.id) || {}).name + " doesn't belong here"); }
+    else if (c.kind === "unknown") { fresh = !BC.unknown.includes(c.id); if (fresh) BC.unknown.push(c.id); BC.note = ""; }
+    else if (c.kind === "thisbin") BC.note = "That's this bin's own label. Scan the pieces in it.";
+    else if (c.kind === "otherbin") BC.note = "That's " + c.id + "'s label. Finish checking " + BC.bin + " first.";
+    else BC.note = raw ? "That QR code isn't an Inventory label." : "Couldn't read a label. Retake it closer, flat and in good light, or type the id below.";
+    bcPaint();
+    return fresh;
+  }
+  const STRAY_TEXT = { elsewhere: (c) => "In another bin: " + c.from + " → move here?", loose: () => "Not in a bin → move here?", sold: () => "Sold: should not be here" };
+  function bcPaint() {
+    if (!state.drawer || state.drawer.kind !== "bincheck") return;
+    const b = binById(BC.bin); if (!b) { closeDrawer(); return; }
+    const expected = state.items.filter((i) => i.bin_id === b.id);
+    const found = expected.filter((i) => BC.found.has(i.id)), notYet = expected.filter((i) => !BC.found.has(i.id));
+    const li = (i, sub, tag = "") => '<li class="unit"><div class="irow-main"><span class="irow-name">' + tag + esc(i.name) + '</span><span class="irow-sub">' + esc(sub) + "</span></div></li>";
+    const live = camSupported() && !CAM.unavailable;
+    const camUi = CAM.on
+      ? '<div id="pa-cam-slot" class="gap-t"></div><div class="drow cam-acts"><span class="muted" aria-hidden="true">' + found.length + " of " + expected.length + " found</span>" +
+        (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
+        '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
+      : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
+    let h = '<p class="muted">Scan the label on every piece in ' + esc(b.id) + ". Found " + found.length + " of " + expected.length + (BC.strays.size ? ", and " + BC.strays.size + " that don't belong here" : "") + ".</p>" + camUi +
+      (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
+      (BC.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
+      (BC.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(BC.note) + "</div></div>" : "");
+    if (BC.strays.size) h += '<div class="pl-eyebrow gap-t">Doesn\'t belong here · ' + BC.strays.size + '</div><ul class="list">' + [...BC.strays.values()].map((c) => li(itemById(c.id) || { name: c.id }, STRAY_TEXT[c.kind](c), '<span class="pl-badge pl-badge--warning">' + (c.kind === "sold" ? "sold" : "stray") + "</span> ")).join("") + "</ul>";
+    if (BC.unknown.length) h += '<div class="pl-eyebrow gap-t">Unknown label · ' + BC.unknown.length + '</div><ul class="list">' + BC.unknown.map((id) => li({ name: id }, "No item with this id here. The label may belong to another agent, or the item was deleted.")).join("") + "</ul>";
+    if (notYet.length) h += '<div class="pl-eyebrow gap-t">Not scanned yet · ' + notYet.length + '</div><ul class="list">' + notYet.map((i) => li(i, [i.condition, i.missing_since ? "missing since " + i.missing_since : ""].filter(Boolean).join(" · "))).join("") + "</ul>";
+    if (found.length) h += '<div class="pl-eyebrow gap-t">Found · ' + found.length + '</div><ul class="list">' + found.map((i) => li(i, i.condition || "", '<span aria-hidden="true">✓</span> ')).join("") + "</ul>";
+    if (!expected.length && !BC.strays.size) h += '<p class="muted gap-t">Nothing is recorded in ' + esc(b.id) + ". Anything you scan here is a stray you can move in.</p>";
+    h += '<div class="form one gap-t">' + field("bc_id", "Or type an item id", "", { placeholder: "an item id", hint: "For a label that won't read." }) + '</div><div class="drow"><button class="pl-btn" data-act="bc-type">Add</button></div><div class="sr-only" id="bc-live" aria-live="polite"></div>';
+    const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
+    const foot = camBtn + capBtn("bc", "Take a photo of a label", !live) + '<button class="pl-btn block' + (live ? "" : "") + '" data-act="bc-finish">Finish check</button><button class="pl-btn pl-btn--ghost block" data-act="close">Cancel</button>';
+    paintDrawer("Check " + '<span class="bin-id">' + esc(b.id) + "</span>", '<div id="bincheck">' + h + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+    if (CAM.on) camMount();
+  }
+  async function bcScan(file) {
+    if (!file || BC.busy) return;
+    BC.busy = true; BC.note = ""; bcPaint();
+    let text = "";
+    try { text = await decodePhoto(file); } catch (e) { BC.busy = false; BC.note = e.message || String(e); return bcPaint(); }
+    BC.busy = false;
+    bcApply(text ? parseLabel(text) : null, text);
+  }
+  async function bcFinish() {
+    const b = binById(BC.bin); if (!b) return;
+    const expected = state.items.filter((i) => i.bin_id === b.id);
+    const notYet = expected.filter((i) => !BC.found.has(i.id));
+    const movable = [...BC.strays.values()].filter((c) => c.kind !== "sold").map((c) => c.id);
+    const sold = [...BC.strays.values()].filter((c) => c.kind === "sold");
+    const box = (name, label, n) => n ? '<label class="pl-checkbox span2"><input type="checkbox" class="pl-checkbox__input" name="' + name + '" value="1" checked><span class="pl-checkbox__box"></span><span class="pl-checkbox__label">' + esc(label) + "</span></label>" : "";
+    await dialog({
+      title: "Finish checking " + b.id, submit: "Save the check",
+      body: '<div class="span2">Found ' + (expected.length - notYet.length) + " of " + expected.length + " recorded here" + (BC.strays.size ? ", plus " + BC.strays.size + " stray" + (BC.strays.size === 1 ? "" : "s") : "") + ".</div>" +
+        box("move", "Move the " + movable.length + " stray" + (movable.length === 1 ? "" : "s") + " into " + b.id, movable.length) +
+        box("missing", "Mark the " + notYet.length + " not scanned as missing", notYet.length) +
+        (sold.length ? '<div class="span2 pl-callout pl-callout--warning"><div class="pl-callout__body">Take out what\'s sold and packed: ' + esc(sold.map((c) => (itemById(c.id) || {}).name || c.id).join(", ")) + ".</div></div>" : "") +
+        '<div class="span2 muted">The bin is stamped as checked today. Anything marked missing shows under Next until it turns up.</div>',
+      onSubmit: async (v) => {
+        const r = await api("/bins/" + encodeURIComponent(b.id) + "/check", "POST", {
+          found: [...BC.found, ...BC.strays.keys()],
+          move_here: v.move ? movable : [],
+          mark_missing: v.missing ? notYet.map((i) => i.id) : [],
+        });
+        toast("Checked " + b.id + (r.moved.length ? " · moved " + r.moved.length + " in" : "") + (r.missing.length ? " · " + r.missing.length + " missing" : ""), "success");
+        camStop(); CAM.idled = false;
+        await refresh();
+        openBin(b.id);
+      },
+    });
+  }
+  const sinceText = (d) => { const n = Math.floor(daysOld(d)); return !Number.isFinite(n) ? "" : n <= 0 ? "checked today" : "checked " + n + " d ago"; };
+  async function foundIt(id) {
+    try { await api("/items/" + encodeURIComponent(id) + "/found", "POST"); toast("Marked found", "success"); } catch (e) { return toast(e.message, "error"); }
+    await refresh();
+  }
+  const BC_ACTS = {
+    bincheck: (id) => openCheck(id),
+    "bc-type": () => { const el = $("#f_bc_id"); const s = clean(el ? el.value : ""); if (!s) return toast("Type an item id", "warning"); bcApply(parseLabel(s) || (binById(s.toUpperCase()) ? { kind: "bin", id: s.toUpperCase() } : { kind: "item", id: s }), s); },
+    "bc-finish": () => bcFinish(),
+    found: (id) => foundIt(id),
+  };
+
   // ── wiring ───────────────────────────────────────────────────────────────────
-  const MENU = [["Record a sale", () => pasteDialog("")], ["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
+  const MENU = [["Record a sale", () => pasteDialog("")], ["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Packaging", () => packagingDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
     close: closeDrawer,
+    shipping: (id) => shippingDialog(id), "pk-new": () => pkEditDialog(""), "pk-edit": (id) => pkEditDialog(id), "pk-del": (id) => pkDelete(id),
     price: (id) => priceDialog(id), sold: (id) => soldDialog(id), list: (id) => listingDialog(id),
     edit: async (id) => itemDialog((await api("/items/" + encodeURIComponent(id))).item),
     del: deleteItem, keep: (id) => setStatus(id, "kept"), withdraw: (id) => setStatus(id, "withdrawn"),
@@ -1943,7 +2198,7 @@ PAGE = r"""<!doctype html>
     bundle: () => { const xs = state.aging.filter((a) => state.agingSel.has(a.item_id)); if (xs.length < 2) return; composeToChat(bundleText(xs)); },
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
-  Object.assign(ACTS, SCAN_ACTS, PA_ACTS);
+  Object.assign(ACTS, SCAN_ACTS, PA_ACTS, BC_ACTS);
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
     else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
@@ -1986,7 +2241,7 @@ PAGE = r"""<!doctype html>
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
       if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
-      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
+      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "bc" ? bcScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
       if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
     });
@@ -2017,7 +2272,7 @@ PAGE = r"""<!doctype html>
     if (mq) mq.addEventListener("change", () => { render(); const d = state.drawer; if (d) refresh(); });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && scanOpen()) poll(); });
     // A hidden view never holds the camera: stop it, and offer Resume when it comes back.
-    document.addEventListener("visibilitychange", () => { if (document.hidden && CAM.on) { camStop(); CAM.idled = true; paPaint(); } });
+    document.addEventListener("visibilitychange", () => { if (document.hidden && CAM.on) { camStop(); CAM.idled = true; camRepaint(); } });
     window.addEventListener("pagehide", () => { if (CAM.on) camStop(); });
     document.addEventListener("error", (e) => {
       const img = e.target;

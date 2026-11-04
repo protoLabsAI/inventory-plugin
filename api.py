@@ -303,9 +303,14 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
     # ── bin labels: the address a QR opens, and the printable sheet ──────────────
     @r.get("/labels/base")
     async def _label_base() -> dict:
-        from .labels import LABEL_PATH, label_base
+        from .labels import DEFAULT_STOCK, LABEL_PATH, label_base, stocks_for
 
-        return {**label_base(cfg), "path": LABEL_PATH}
+        return {
+            **label_base(cfg),
+            "path": LABEL_PATH,
+            "stocks": {"bins": stocks_for("bins"), "items": stocks_for("items")},
+            "default_stock": DEFAULT_STOCK,
+        }
 
     @r.post("/labels/sheet")
     async def _label_sheet(body: dict | None = None) -> dict:
@@ -314,26 +319,44 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         for item stickers on Avery 5160. Records them as printed (``mark``, default true) in the
         same call. ``link`` is a short-lived public address for the same sheet (see sheetlinks.py):
         the view opens it so the sheet lands in a real browser, the desktop app's included."""
-        from .labels import ITEM_LABELS_PER_SHEET, item_sheet_html, label_base, sheet_html
+        from .labels import (
+            BIN_STOCKS,
+            DEFAULT_STOCK,
+            ITEM_STOCKS,
+            STOCK_NAMES,
+            bins_on_stock,
+            items_on_stock,
+            label_base,
+            per_sheet,
+        )
         from .sheetlinks import SHEETS, sheet_link
 
         body = body or {}
         info = label_base(cfg)
         if not info["base"]:
             raise HTTPException(status_code=409, detail=info["problem"])
+        kind = "items" if "items" in body else "bins"
+        stock = str(body.get("stock") or DEFAULT_STOCK[kind])
+        if stock not in (ITEM_STOCKS if kind == "items" else BIN_STOCKS):
+            raise HTTPException(
+                status_code=400,
+                detail=f"label stock {stock!r} isn't one for {kind}; one of "
+                + ", ".join(ITEM_STOCKS if kind == "items" else BIN_STOCKS),
+            )
+        per = per_sheet(stock)
+        try:
+            raw_start = body.get("start_at")
+            start_at = 1 if raw_start in (None, "") else int(raw_start)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"start_at must be a label number from 1 to {per}") from exc
+        if not 1 <= start_at <= per:
+            raise HTTPException(status_code=400, detail=f"start_at must be a label number from 1 to {per}")
         if "items" in body:
             want = body.get("items")
             if not isinstance(want, list) or not want:
                 raise HTTPException(status_code=400, detail="items must be a non-empty list of item ids")
             if len(want) > 300:
-                raise HTTPException(status_code=400, detail="at most 300 item labels (10 sheets) at a time")
-            try:
-                raw_start = body.get("start_at")
-                start_at = 1 if raw_start in (None, "") else int(raw_start)
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="start_at must be a label number from 1 to 30") from exc
-            if not 1 <= start_at <= ITEM_LABELS_PER_SHEET:
-                raise HTTPException(status_code=400, detail="start_at must be a label number from 1 to 30")
+                raise HTTPException(status_code=400, detail="at most 300 item labels at a time")
             picked = []
             for raw in dict.fromkeys(str(i or "").strip() for i in want):
                 it = store.get_item(raw) if raw else None
@@ -348,9 +371,11 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
                     _raise(exc)
                 for i in ids:
                     emit("item.changed", {"id": i, "action": "labels"})
-            html = item_sheet_html(picked, info["base"], start_at=start_at)
+            html = items_on_stock(picked, info["base"], stock, start_at=start_at)
             return {
                 "kind": "items",
+                "stock": stock,
+                "stock_name": STOCK_NAMES[stock],
                 "ids": ids,
                 "base": info["base"],
                 "phone_reachable": info["phone_reachable"],
@@ -388,14 +413,42 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
             except InventoryError as exc:
                 _raise(exc)
             emit("bin.changed", {"ids": ids, "action": "labels"})
-        html = sheet_html(picked, info["base"])
+        html = bins_on_stock(picked, info["base"], stock, start_at=start_at)
         return {
             "ids": ids,
+            "stock": stock,
+            "stock_name": STOCK_NAMES[stock],
             "base": info["base"],
             "phone_reachable": info["phone_reachable"],
             "html": html,
             "link": sheet_link(SHEETS.put(html)),
         }
+
+    @r.post("/bins/{bin_id}/check")
+    async def _check_bin(bin_id: str, body: dict | None = None) -> dict:
+        body = body or {}
+        lists = {k: body.get(k) or [] for k in ("found", "move_here", "mark_missing")}
+        if not all(isinstance(v, list) for v in lists.values()):
+            raise HTTPException(status_code=400, detail="found, move_here and mark_missing must be lists of item ids")
+        try:
+            out = store.check_bin(
+                bin_id, lists["found"], move_here=lists["move_here"], mark_missing=lists["mark_missing"], actor=ACTOR
+            )
+        except InventoryError as exc:
+            _raise(exc)
+        for i in dict.fromkeys(out["moved"] + out["missing"] + out["found_again"]):
+            emit("item.changed", {"id": i, "action": "check", "bin_id": out["bin_id"]})
+        emit("bin.changed", {"ids": [out["bin_id"]], "action": "check"})
+        return out
+
+    @r.post("/items/{item_id}/found")
+    async def _found(item_id: str) -> dict:
+        try:
+            item = store.clear_missing(item_id, actor=ACTOR)
+        except InventoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        emit("item.changed", {"id": item_id, "action": "found"})
+        return {"item": item}
 
     @r.get("/to-pack")
     async def _to_pack() -> dict:
@@ -728,6 +781,51 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
                 "Cache-Control": "private, no-store",
             },
         )
+
+    # ── shipping: packaging presets and each item's packed weight + box (0.15.0) ────────
+    @r.get("/packaging")
+    async def _packaging() -> dict:
+        return {"packaging": store.list_packaging()}
+
+    @r.post("/packaging")
+    async def _new_packaging(body: dict | None = None) -> dict:
+        try:
+            pk = store.upsert_packaging({k: v for k, v in (body or {}).items() if k != "id"}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("packaging.changed", {"id": pk["id"], "action": "create"})
+        return {"packaging": pk}
+
+    @r.put("/packaging/{packaging_id}")
+    async def _put_packaging(packaging_id: str, body: dict | None = None) -> dict:
+        try:
+            pk = store.upsert_packaging({**(body or {}), "id": packaging_id}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("packaging.changed", {"id": pk["id"], "action": "update"})
+        return {"packaging": pk}
+
+    @r.delete("/packaging/{packaging_id}")
+    async def _delete_packaging(packaging_id: str) -> dict:
+        try:
+            n = store.delete_packaging(packaging_id, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        if not n:
+            raise HTTPException(status_code=404, detail=f"no packaging {packaging_id!r}")
+        emit("packaging.changed", {"id": packaging_id, "action": "delete"})
+        return {"ok": True}
+
+    @r.put("/items/{item_id}/shipping")
+    async def _put_shipping(item_id: str, body: dict | None = None) -> dict:
+        if store.get_item(item_id) is None:
+            raise HTTPException(status_code=404, detail=f"no item {item_id!r}")
+        try:
+            item = store.set_shipping(item_id, body or {}, actor=ACTOR)
+        except InventoryError as exc:
+            _raise(exc)
+        emit("item.changed", {"id": item_id, "action": "shipping"})
+        return {"item": item}
 
     @r.get("/stale")
     async def _stale(listed_days: int = 14, price_days: int | None = None) -> dict:
