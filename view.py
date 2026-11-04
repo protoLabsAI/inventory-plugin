@@ -9,6 +9,8 @@ it own theme tokens + the init handshake.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .labels import (
     ITEM_PREFIX,
     LABEL_PREFIX,
@@ -145,6 +147,7 @@ PAGE = r"""<!doctype html>
 <div id="dialog-root"></div>
 <div class="pl-toast-stack" id="toasts" data-position="top-center" aria-live="polite"></div>
 <div class="sr-only" id="sr-live" aria-live="polite"></div>
+<!--vendor:jsqr-->
 <script type="module">
   const $ = (s, r = document) => r.querySelector(s);
   // RULE 4 — plugin-kit.js is an ES module → dynamic import. With no kit there is no bearer, so
@@ -522,7 +525,8 @@ PAGE = r"""<!doctype html>
       kv("Bin", (it.bin_id ? '<button class="pl-btn pl-btn--ghost pl-btn--sm bin-id" data-bin="' + esc(it.bin_id) + '">' + esc(binText(it.bin_id)) + "</button>" : '<span class="muted">Not in a bin</span>') +
         (it.status === "sold" && !it.bin_id ? "" : ' <button class="pl-btn pl-btn--sm" data-act="movebin" data-id="' + esc(it.id) + '">' + (it.bin_id ? "Move" : "Put in a bin") + "</button>")) +
       kv("Label", (it.labels_printed_on ? '<span>Printed ' + esc(it.labels_printed_on) + "</span>" : '<span class="muted">Never printed</span>') +
-        ' <button class="pl-btn pl-btn--sm" data-act="itemlabel" data-id="' + esc(it.id) + '">Print label</button>') +
+        ' <button class="pl-btn pl-btn--sm" data-act="itemlabel" data-id="' + esc(it.id) + '">Print label</button>' +
+        (UNSOLD.includes(it.status) ? ' <button class="pl-btn pl-btn--sm" data-act="pa-add" data-id="' + esc(it.id) + '">' + (PA.ids.includes(it.id) ? "In put away" : "Add to put away") + "</button>" : "")) +
       kv("System", esc(it.system) || '<span class="muted">—</span>') +
       kv("Condition", esc(it.condition) || '<span class="muted">—</span>') +
       kv("Category", esc(it.category) || '<span class="muted">—</span>') +
@@ -604,6 +608,7 @@ PAGE = r"""<!doctype html>
       else if (d && d.kind === "bin") openBin(d.id);
       else if (d && d.kind === "history") openHistory();
       else if (d && d.kind === "scan") scPaint();
+      else if (d && d.kind === "putaway") paPaint();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
 
@@ -666,6 +671,8 @@ PAGE = r"""<!doctype html>
     }
     const stale = items.filter((i) => isStale(i)).length;
     const chores = [];
+    const waiting = awaitingPutAway(items).length;
+    if (waiting && state.bins.length) chores.push('<li><button class="irow" data-act="putaway"><span class="irow-main">' + waiting + " labelled piece" + (waiting === 1 ? " is" : "s are") + ' waiting to be put away</span><span class="muted">Put away</span></button></li>');
     if (state.unbinned) chores.push(state.bins.length
       ? '<li><button class="irow" data-see="nobin"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " is" : "s are") + ' not in a bin</span><span class="muted">Start binning</span></button></li>'
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
@@ -764,7 +771,7 @@ PAGE = r"""<!doctype html>
     if (!state.bins.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Number your boxes or shelves B01, B02 … and record what lives where. ' + (state.unbinned ? state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + " no location yet." : "") + '</div><div class="pl-empty__action"><button class="pl-btn pl-btn--primary" data-act="newbins">Create bins</button></div></div>';
     const rows = state.bins.map((b) => '<li><button class="irow" data-bin="' + esc(b.id) + '"><span class="irow-main"><span class="irow-name"><span class="bin-id">' + esc(b.id) + "</span>" + (b.label ? " · " + esc(b.label) : "") + '</span><span class="irow-sub">' + b.items + " item" + (b.items === 1 ? "" : "s") + '</span></span><span class="money">' + esc(whole(b.value_at_target)) + "</span></button></li>").join("");
     const loose = state.unbinned ? '<ul class="list note"><li><button class="irow" data-see="nobin"><span class="irow-main"><span class="irow-name">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? "" : "s") + ' not in a bin</span><span class="irow-sub">Open them in Stock and move them</span></span></button></li></ul>' : "";
-    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><span class="row-acts"><button class="pl-btn pl-btn--sm" data-act="printlabels">Print labels</button><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></span></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
+    return '<section class="sec"><div class="sec-head"><h2 class="sec-title">Bins <span class="muted">' + state.bins.length + '</span></h2><span class="row-acts"><button class="pl-btn pl-btn--sm pl-btn--primary" data-act="putaway">Put away</button><button class="pl-btn pl-btn--sm" data-act="printlabels">Print labels</button><button class="pl-btn pl-btn--sm" data-act="newbins">New bins</button></span></div>' + loose + '<ul class="list">' + rows + "</ul></section>";
   }
   function renderLots() {
     const s = state.summary; if (!s || !s.lots.length) return '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No lots yet</div><div class="pl-empty__desc">Add one from More.</div></div>';
@@ -1242,21 +1249,18 @@ PAGE = r"""<!doctype html>
         const right = i.target != null ? '<button class="pl-btn pl-btn--ghost pl-btn--sm money" data-act="price" data-id="' + esc(i.id) + '">' + esc(whole(i.target)) + "</button>" : pr.state === "queued" ? "" : '<button class="pl-btn pl-btn--sm" data-act="price" data-id="' + esc(i.id) + '">Set price</button>';
         return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + esc(sub) + "</span></div>" + right + "</li>";
       }).join("") + '</ul><p class="muted">Tap a price to change it. A price always keeps its basis.</p>';
-      return [h, btnP("sc-tobins", "Bin them")];
+      return [h, btnP("sc-tolabels", "Label them")];
     },
     6: () => {
+      // Label first (0.11.0): a sticker goes on each piece you're selling, and the piece finds
+      // its bin later, in Put away, by scanning its label and then the bin's.
       const items = scanItems();
-      if (!state.bins.length) return ['<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">No bins yet</div><div class="pl-empty__desc">Make a few, then put each piece in one.</div></div>', btnP("newbins", "New bins") + btn("sc-done", "Finish without bins")];
-      const sel = (i) => {
-        const sellable = UNSOLD.includes(i.status);
-        const cur = SC.bins[i.id] !== undefined ? SC.bins[i.id] : i.bin_id || (sellable ? SC.lastBin : "");
-        return '<select class="pl-select binsel" data-binsel="' + esc(i.id) + '" data-sell="' + (sellable ? 1 : 0) + '" aria-label="Bin for ' + esc(i.name) + '"><option value="">' + (sellable ? "Pick a bin" : "Not binned") + "</option>" +
-          sortBins(state.bins).map((b) => '<option value="' + esc(b.id) + '"' + (cur === b.id ? " selected" : "") + ">" + esc(binText(b.id)) + "</option>").join("") + "</select>";
-      };
-      const row = (i) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + (UNSOLD.includes(i.status) ? "to sell" : "kept") + "</span></div>" + sel(i) + "</li>";
       const sells = items.filter((i) => UNSOLD.includes(i.status)), kept = items.filter((i) => !UNSOLD.includes(i.status));
-      return ['<h3 class="dh">Put each piece in a bin</h3><p class="muted">After the first, each piece defaults to the last bin you picked.</p>' +
-        (sells.length ? '<ul class="list">' + sells.map(row).join("") + "</ul>" : "") + (kept.length ? '<div class="pl-eyebrow gap-t">Kept (optional)</div><ul class="list">' + kept.map(row).join("") + "</ul>" : ""), btnP("sc-done", "Done") + (sells.length ? btn("sc-done-labels", "Done and print " + sells.length + " label" + (sells.length === 1 ? "" : "s")) + btn("sc-toprices", "Back to prices") : "")];
+      const row = (i) => '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">' + (UNSOLD.includes(i.status) ? "to sell" : "kept") + "</span></div></li>";
+      const n = sells.length;
+      return ['<h3 class="dh">Label them</h3><p class="muted">' + (n ? "Print a sticker for each piece you're selling and stick it on. Then use Put away: scan a piece's label, then the label of the bin it goes in." : "Nothing to sell here, so there's nothing to label.") + "</p>" +
+        (n ? '<ul class="list">' + sells.map(row).join("") + "</ul>" : "") + (kept.length ? '<div class="pl-eyebrow gap-t">Kept</div><ul class="list">' + kept.map(row).join("") + "</ul>" : ""),
+        n ? btnP("sc-done-labels", "Print " + n + " label" + (n === 1 ? "" : "s")) + btn("sc-done", "Skip labels") + btn("sc-toprices", "Back to prices") : btnP("sc-done", "Done")];
     },
   };
   function scPaint() {
@@ -1323,19 +1327,13 @@ PAGE = r"""<!doctype html>
     scPaint(); poll();
   }
   async function finishScan(labels = false) {
-    const placements = {};
-    document.querySelectorAll("#scan-flow [data-binsel]").forEach((el) => { if (el.value) placements[el.dataset.binsel] = el.value; });
     try {
-      const { scan } = await api("/scans/" + encodeURIComponent(SC.id) + "/finish", "POST", { placements });
-      const items = scan.item_ids.map(itemById).filter(Boolean), sold = items.filter((i) => UNSOLD.includes(i.status)).length, kept = items.length - sold;
-      const binned = Object.keys(placements).length, binsUsed = [...new Set(Object.values(placements))];
-      toast(clean(lotName(SC.lotId) || SC.boxName) + ": " + binned + " binned" + (binsUsed.length === 1 ? " in " + binsUsed[0] : "") + (kept ? ", " + kept + " kept" : ""), "success");
+      const { scan } = await api("/scans/" + encodeURIComponent(SC.id) + "/finish", "POST", { placements: {} });
+      const items = scan.item_ids.map(itemById).filter(Boolean);
+      const sells = items.filter((i) => UNSOLD.includes(i.status)).map((i) => i.id), kept = items.length - sells.length;
+      toast(clean(lotName(SC.lotId) || SC.boxName) + ": " + sells.length + " to label and put away" + (kept ? ", " + kept + " kept" : ""), "success");
       scReset(); closeDrawer(); await refresh();
-      // "Done and print labels": the sell pieces just binned (kept pieces don't need a sticker).
-      if (labels) {
-        const sells = scan.item_ids.map(itemById).filter((i) => i && UNSOLD.includes(i.status)).map((i) => i.id);
-        if (sells.length) await itemLabelsDialog(sells, "Print labels for these " + sells.length + " piece" + (sells.length === 1 ? "" : "s"));
-      }
+      if (labels && sells.length) await itemLabelsDialog(sells, "Print labels for these " + sells.length + " piece" + (sells.length === 1 ? "" : "s"));
     } catch (e) { toast(e.message, "error"); }
   }
   async function scanPhoto(file) {
@@ -1401,7 +1399,7 @@ PAGE = r"""<!doctype html>
     },
     "sc-confirm": () => confirmScan(),
     "sc-reprice": async () => { try { SC.data = (await api("/scans/" + encodeURIComponent(SC.id) + "/price", "POST")).scan; } catch (e) { toast(e.message, "error"); } scPaint(); poll(); },
-    "sc-tobins": () => { SC.step = 6; scPaint(); },
+    "sc-tolabels": () => { SC.step = 6; scPaint(); },
     "sc-toprices": () => { SC.step = 5; scPaint(); poll(); },
     "sc-done": () => finishScan(),
     "sc-done-labels": () => finishScan(true),
@@ -1418,6 +1416,129 @@ PAGE = r"""<!doctype html>
     return "Bin the pieces";
   }
   const scanNeedsCheck = (s) => s.state === "failed" || (s.state === "proposed" && !confident(s.proposal));
+
+  // ── put away (0.11.0): label first, then scan a piece's label and its bin's label ────────
+  // The frame has no camera permission, so a label is read from a photo (native capture) and
+  // decoded here by the vendored jsQR. Only this plugin's two label paths are accepted (any
+  // host: a label encodes the hub's address). A decoded URL is parsed, never opened.
+  const PA_KEY = "inventory.putaway";
+  function loadTray() { try { const v = JSON.parse(sessionStorage.getItem(PA_KEY) || "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string").slice(0, 300) : []; } catch (_) { return []; } }
+  const PA = { ids: loadTray(), busy: false, note: "" };
+  function saveTray() { try { sessionStorage.setItem(PA_KEY, JSON.stringify(PA.ids)); } catch (_) { /* memory only */ } }
+  const awaitingPutAway = (items) => items.filter((i) => UNSOLD.includes(i.status) && !i.bin_id && i.labels_printed_on);
+  function parseLabel(text) {
+    let u;
+    try { u = new URL(String(text || "").trim()); } catch (_) { return null; }
+    if (!/^https?:$/.test(u.protocol)) return null;
+    const m = /\/plugins\/inventory\/(i|b)\/([^/?#]+)\/?$/.exec(u.pathname);
+    if (!m) return null;
+    let id;
+    try { id = decodeURIComponent(m[2]).trim(); } catch (_) { return null; }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/.test(id)) return null;
+    return m[1] === "i" ? { kind: "item", id } : { kind: "bin", id: id.toUpperCase() };
+  }
+  function parseTyped(text) {
+    const s = clean(text);
+    if (!s) return null;
+    const lab = parseLabel(s); if (lab) return lab;
+    if (binById(s.toUpperCase())) return { kind: "bin", id: s.toUpperCase() };
+    const it = itemById(s) || state.items.find((i) => i.id.toLowerCase() === s.toLowerCase());
+    return it ? { kind: "item", id: it.id } : { kind: "unknown", id: s };
+  }
+  function loadImage(file) {
+    const viaImg = () => new Promise((res, rej) => {
+      const url = URL.createObjectURL(file), im = new Image();
+      im.onload = () => { URL.revokeObjectURL(url); res(im); };
+      im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("That photo couldn't be opened. Try again, or type the id.")); };
+      im.src = url;
+    });
+    return window.createImageBitmap ? createImageBitmap(file).catch(viaImg) : viaImg();
+  }
+  // One decode at a size: 1600 px on the long side first (fast, and enough for a sticker that
+  // fills a good part of the frame), then full size, then 1000 px.
+  function readQr(src, max) {
+    const w0 = src.width, h0 = src.height; if (!w0 || !h0) return "";
+    const long = Math.max(w0, h0), k = max && long > max ? max / long : 1;
+    if (!max && w0 * h0 > 24e6) return "";
+    const w = Math.max(1, Math.round(w0 * k)), h = Math.max(1, Math.round(h0 * k));
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(src, 0, 0, w, h);
+    const r = jsQR(g.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: "attemptBoth" });
+    return r && r.data ? r.data : "";
+  }
+  async function decodePhoto(file) {
+    if (typeof jsQR !== "function") throw new Error("The label reader didn't load. Reload Inventory, or type the id.");
+    const img = await loadImage(file);
+    for (const max of [1600, 0, 1000]) { const t = readQr(img, max); if (t) return t; }
+    return "";
+  }
+  function openPutAway() { ++drawerSeq; state.drawer = { kind: "putaway" }; PA.note = ""; paPaint(); }
+  function paPaint() {
+    if (!state.drawer || state.drawer.kind !== "putaway") return;
+    PA.ids = PA.ids.filter((id) => { const it = itemById(id); return it && it.status !== "sold"; }); saveTray();
+    const rows = PA.ids.map((id) => {
+      const it = itemById(id);
+      return '<li class="unit"><div class="irow-main"><span class="irow-name">' + esc(it.name) + '</span><span class="irow-sub">' + esc([it.condition, it.bin_id ? "now in " + binText(it.bin_id) : "not in a bin"].filter(Boolean).join(" · ")) +
+        '</span></div><button class="pl-btn pl-btn--ghost pl-btn--sm tall" data-act="pa-remove" data-id="' + esc(id) + '" aria-label="Take ' + esc(it.name) + ' out of put away">Remove</button></li>';
+    }).join("");
+    const n = PA.ids.length;
+    const body = '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>" +
+      (PA.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
+      (PA.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(PA.note) + "</div></div>" : "") +
+      (n ? '<div class="pl-eyebrow gap-t">To put away · ' + n + '</div><ul class="list">' + rows + "</ul>" : "") +
+      '<div class="form one gap-t">' + field("pa_id", "Or type an item or bin id", "", { placeholder: "B03 or an item id", hint: "For a label that won't read." }) + '</div><div class="drow"><button class="pl-btn" data-act="pa-type">Add</button></div>' +
+      '<div class="sr-only" id="pa-live" aria-live="polite"></div>';
+    const foot = capBtn("pa", n ? "Scan the bin's label" : "Scan a label") + (n ? '<button class="pl-btn block" data-act="pa-clear">Clear the list</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
+    paintDrawer("Put away", '<div id="putaway">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+  }
+  const paSay = (t) => { const l = $("#pa-live"); if (l) l.textContent = t; };
+  async function paScan(file) {
+    if (!file || PA.busy) return;
+    PA.busy = true; PA.note = ""; paPaint();
+    let text = "";
+    try { text = await decodePhoto(file); }
+    catch (e) { PA.busy = false; PA.note = e.message || String(e); return paPaint(); }
+    PA.busy = false;
+    const lab = text ? parseLabel(text) : null;
+    if (!lab) { PA.note = text ? "That QR code isn't an Inventory label." : "Couldn't read a label. Retake it closer, flat and in good light, or type the id below."; return paPaint(); }
+    return paApply(lab);
+  }
+  async function paApply(lab) {
+    if (lab.kind === "item") {
+      const it = itemById(lab.id);
+      if (!it) { PA.note = "There's no item " + lab.id + " here. The label may belong to another agent."; return paPaint(); }
+      if (it.status === "sold") { PA.note = clean(it.name) + " is sold, so there's nothing to put away."; return paPaint(); }
+      if (!PA.ids.includes(it.id)) PA.ids.push(it.id);
+      saveTray(); PA.note = ""; paPaint(); return paSay("Added " + it.name);
+    }
+    if (lab.kind === "bin") {
+      if (!binById(lab.id)) { PA.note = "There's no bin " + lab.id + " here. Create it first, from Bins."; return paPaint(); }
+      const ids = PA.ids.filter((id) => itemById(id));
+      if (!ids.length) { closeDrawer(); return openBin(lab.id); }
+      return paMove(ids, lab.id);
+    }
+    PA.note = "There's no item or bin " + lab.id + " here."; return paPaint();
+  }
+  async function paMove(ids, bin) {
+    const names = ids.map((id) => "<li>" + esc(itemById(id).name) + "</li>").join("");
+    await dialog({
+      title: "Put " + ids.length + " item" + (ids.length === 1 ? "" : "s") + " in " + binText(bin) + "?", submit: "Move to " + bin,
+      body: '<ul class="list span2">' + names + "</ul>",
+      onSubmit: async () => {
+        const r = await api("/bins/move", "POST", { item_ids: ids, bin_id: bin, put_away: true });
+        PA.ids = PA.ids.filter((id) => !ids.includes(id)); saveTray(); PA.note = "";
+        toast(ids.length + " item" + (ids.length === 1 ? "" : "s") + " → " + bin + (r.now_available.length ? " · " + r.now_available.length + " now for sale" : ""), "success");
+        await refresh();
+      },
+    });
+  }
+  const PA_ACTS = {
+    putaway: () => openPutAway(),
+    "pa-add": (id) => { if (!PA.ids.includes(id)) PA.ids.push(id); saveTray(); toast("Added to put away. Scan the bin's label from Bins ▸ Put away.", "success"); refresh(); },
+    "pa-remove": (id) => { PA.ids = PA.ids.filter((x) => x !== id); saveTray(); paPaint(); },
+    "pa-clear": () => { PA.ids = []; saveTray(); PA.note = ""; paPaint(); },
+    "pa-type": () => { const el = $("#f_pa_id"); const lab = parseTyped(el ? el.value : ""); if (!lab) return toast("Type an item id or a bin id", "warning"); return paApply(lab); },
+  };
 
   // ── wiring ───────────────────────────────────────────────────────────────────
   const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
@@ -1438,7 +1559,7 @@ PAGE = r"""<!doctype html>
     "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
-  Object.assign(ACTS, SCAN_ACTS);
+  Object.assign(ACTS, SCAN_ACTS, PA_ACTS);
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
     else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
@@ -1480,10 +1601,9 @@ PAGE = r"""<!doctype html>
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
       if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
-      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
+      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
       if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
-      if (t.dataset.binsel) { SC.bins[t.dataset.binsel] = t.value; if (t.value && t.dataset.sell === "1") SC.lastBin = t.value; return scPaint(); }
     });
     document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } });
     document.addEventListener("keydown", (e) => {
@@ -1528,6 +1648,23 @@ PAGE = r"""<!doctype html>
 """
 
 
+_JSQR = Path(__file__).resolve().parent / "vendor" / "jsqr" / "jsQR.js"
+_SERVED: str | None = None
+
+
+def served_page() -> str:
+    """PAGE with the vendored jsQR (Apache-2.0, vendor/jsqr) inlined as a classic script, so
+    Put away can read a label's QR from a photo with no request at runtime. PAGE itself (what
+    the four-rules tests read) stays the hand-written page; the decoder is third-party code."""
+    global _SERVED
+    if _SERVED is None:
+        js = _JSQR.read_text(encoding="utf-8")
+        if "</script" in js.lower():
+            raise RuntimeError("vendored jsQR contains a closing script tag")
+        _SERVED = PAGE.replace("<!--vendor:jsqr-->", "<script>\n" + js + "\n</script>", 1)
+    return _SERVED
+
+
 def build_view_router(cfg: dict):
     """The PUBLIC router — mounted at ``/plugins/inventory``: the page, the bin- and item-label hops,
     and a printable label sheet by its short-lived token."""
@@ -1538,7 +1675,7 @@ def build_view_router(cfg: dict):
 
     @r.get(VIEW_PATH, response_class=HTMLResponse, include_in_schema=False)
     async def _view():
-        return HTMLResponse(PAGE)
+        return HTMLResponse(served_page())
 
     # The one other public route: the address printed on a bin label. It takes nothing but a
     # bin id, reads no data and echoes only that id, then hands off to the console (or says

@@ -271,7 +271,7 @@ the scan, so the agent can learn from what it got wrong.
   `identifying`).
 - Each row shows the thumbnail, the name (or a skeleton while identifying), and a **two-option
   `pl-segmented` control: Keep | Sell**, where Sell is the default. That is the whole decision per unit.
-  Status follows from it: Keep → `kept`, Sell → `planned`, which becomes `available` once it's binned (S6).
+  Status follows from it: Keep → `kept`, Sell → `planned`, which becomes `available` once it's put away in a bin (§4, Put away).
 - A low-confidence row shows a `pl-badge--warning` "Check" and opens the same correction sheet as S3.
 - A row that's still identifying doesn't block anything. It just stays pending.
 - A running footer shows **"2 to sell · 2 kept"**, plus the estimated value at target once comps arrive.
@@ -285,10 +285,10 @@ already requires a basis. **Accept all** sets the proposed targets with their re
 existing `items/{id}/price` route. The lot's projected net shows live at the top (+$NN for Pyre and
 Flood).
 
-**S6. Bin them.** For each Sell unit, the screen shows "Put it in a bin". The first bin of the session is
-picked from a list of recent bins. After that, the default is **the same bin as the last unit**, so one bin
-takes one tap per unit. **Done** closes the flow and shows a toast at the top, clear of the thumb zone:
-"Pyre and Flood: 2 binned in B07, 2 kept". Kept units can optionally go to a bin as well.
+**S6. Label them** (0.11.0, label first; this replaced "Bin them"). The screen lists the Sell pieces and
+offers **Print N labels** (Avery 5160 item stickers, opened in the operator's browser), **Skip labels**, and
+**Back to prices**. Finishing leaves every piece unbinned: Keep → `kept`, Sell → `planned`. Josh's rule: a
+piece gets its label first, and the label is how it meets its bin. Binning happens later in **Put away** (§4).
 
 He can leave any screen. The lot and its scans persist in their current state, and the unfinished work
 shows up on **Next ▸ Needs a look** or **To split**, ready to resume from the same screen.
@@ -296,6 +296,19 @@ shows up on **Next ▸ Needs a look** or **To split**, ready to resume from the 
 ---
 
 ## 4. Bins
+
+### Put away (0.11.0): a piece's label, then its bin's label
+
+Bins ▸ **Put away** (also Next ▸ Housekeeping "N labelled pieces waiting to be put away", and an item drawer's
+**Add to put away**) opens a tray. **Scan a label** takes a photo with the native camera sheet (the plugin
+frame has no camera permission, so there is no live viewfinder) and the view decodes the QR itself with the
+vendored jsQR (Apache-2.0, `vendor/jsqr`), trying 1600 px, full size, then 1000 px. A piece's label
+(`…/plugins/inventory/i/<id>`) adds it to the tray, showing name, condition and current bin. A bin's label
+(`…/plugins/inventory/b/<id>`) with pieces in the tray asks "Put N items in B03?" and does one audited move
+with `put_away: true`, which also turns a `planned` piece `available`. A bin label with an empty tray opens the
+bin. An unreadable photo says so, with a type-an-id field. Only these two paths are accepted, from any host
+(labels carry the hub's address), and a decoded URL is parsed, never opened. The tray lives in
+`sessionStorage`. Labels scanned with the iPhone Camera app still open the item or the bin on their own.
 
 ### Model (new)
 

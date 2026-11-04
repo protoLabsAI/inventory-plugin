@@ -1188,10 +1188,14 @@ class InventoryStore:
             b["value_at_target"] = dollars(s["value"] if s else 0)
         return {"bins": bins, "unbinned_unsold": unbinned}
 
-    def move_items(self, item_ids, bin_id: str, *, actor: str = "") -> dict:
+    def move_items(self, item_ids, bin_id: str, *, actor: str = "", put_away: bool = False) -> dict:
         """Put items in ``bin_id`` ('' = take them out of any bin). All or nothing: an unknown
         item or bin refuses the whole move. Each item that actually moves gets an audit row
-        with ``{"bin": [from, to]}``."""
+        with ``{"bin": [from, to]}``.
+
+        ``put_away`` (0.11.0, the label-first flow): a ``planned`` piece put in a bin is split
+        out and on the shelf, so it becomes ``available``, audited, the way finishing a scan
+        with a bin did before. A sold item is refused: it has left the shelf."""
         if isinstance(item_ids, str):
             item_ids = [item_ids]
         ids = list(dict.fromkeys(str(i).strip() for i in (item_ids or []) if str(i).strip()))
@@ -1204,20 +1208,44 @@ class InventoryStore:
                 raise InventoryError(f"no bin {target!r}; create it first")
             rows = {
                 r["id"]: r
-                for r in con.execute(f"SELECT id, bin_id FROM items WHERE id IN ({','.join('?' * len(ids))})", ids)
+                for r in con.execute(
+                    f"SELECT id, bin_id, status FROM items WHERE id IN ({','.join('?' * len(ids))})", ids
+                )
             }
             missing = [i for i in ids if i not in rows]
             if missing:
                 raise InventoryError(f"no item(s) {', '.join(repr(m) for m in missing)}")
+            if put_away:
+                if not target:
+                    raise InventoryError("put away needs a bin")
+                sold = [i for i in ids if rows[i]["status"] == "sold"]
+                if sold:
+                    raise InventoryError(f"sold item(s) can't be put away: {', '.join(repr(i) for i in sold)}")
             ts = now_iso()
+            available = []
             for i in ids:
                 was = rows[i]["bin_id"] or ""
-                if was == target:
-                    continue
-                con.execute("UPDATE items SET bin_id=?, updated_at=? WHERE id=?", (target, ts, i))
-                self._audit(con, "item", i, "move", actor, {"bin": [was, target]})
-                moved.append(i)
-        return {"bin_id": target, "moved": moved, "unchanged": [i for i in ids if i not in moved]}
+                if was != target:
+                    con.execute("UPDATE items SET bin_id=?, updated_at=? WHERE id=?", (target, ts, i))
+                    self._audit(
+                        con,
+                        "item",
+                        i,
+                        "move",
+                        actor,
+                        {"bin": [was, target], **({"put_away": True} if put_away else {})},
+                    )
+                    moved.append(i)
+                if put_away and rows[i]["status"] == "planned":
+                    con.execute("UPDATE items SET status='available', updated_at=? WHERE id=?", (ts, i))
+                    self._audit(con, "item", i, "update", actor, {"status": "available", "reason": "put away"})
+                    available.append(i)
+        return {
+            "bin_id": target,
+            "moved": moved,
+            "unchanged": [i for i in ids if i not in moved],
+            "now_available": available,
+        }
 
     def to_pack(self) -> list[dict]:
         """The pick list: every sale not yet packed, with the item's name and the bin to pull
@@ -1650,7 +1678,7 @@ class InventoryStore:
         self, scan_id: str, body: dict, *, actor: str = "", timeout_minutes: int = SCAN_TIMEOUT_MINUTES
     ) -> dict:
         """Write what the operator settled on. A box: the lot gets its real name and every unit
-        becomes an item — Keep → ``kept``, Sell → ``planned`` (``available`` once binned). A piece
+        becomes an item — Keep → ``kept``, Sell → ``planned`` (``available`` once put away in a bin). A piece
         on its own: one item. All in one transaction; the correction (what the agent proposed vs
         what was chosen, and how) is kept on the scan."""
         sid = scan_key(scan_id)
@@ -1789,9 +1817,11 @@ class InventoryStore:
         actor: str = "",
         timeout_minutes: int = SCAN_TIMEOUT_MINUTES,
     ) -> dict:
-        """Bin the scan's pieces and close it. ``placements`` = {item_id: bin_id}; a sell piece
-        that lands in a bin becomes ``available`` (it is split out and on the shelf); one left
-        out stays ``planned``. Moves are audited like any other move."""
+        """Close the scan. Since 0.11.0 the view finishes with no ``placements``: pieces are
+        labelled first and binned later by Put away (``move_items(put_away=True)``). The API
+        still takes ``placements`` = {item_id: bin_id}; a sell piece that lands in a bin becomes
+        ``available`` (it is split out and on the shelf); one left out stays ``planned``. Moves are
+        audited like any other move."""
         sid = scan_key(scan_id)
         placements = placements or {}
         if not isinstance(placements, dict):

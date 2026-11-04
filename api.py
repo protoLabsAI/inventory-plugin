@@ -8,7 +8,7 @@ import logging
 
 from fastapi import Request  # module level: FastAPI resolves the (postponed) annotation from these globals
 
-from .store import InventoryError, InventoryStore, normalize_status
+from .store import InventoryError, InventoryStore, as_flag, normalize_status
 
 #: Target fields never travel through the generic item write — they need a basis (POST /price).
 _PRICE_ONLY = ("target", "target_low", "target_high", "price_basis", "price_updated_on")
@@ -286,10 +286,12 @@ def build_data_router(store: InventoryStore, cfg: dict, *, emit=lambda topic, da
         if not isinstance(ids, list):
             raise HTTPException(status_code=400, detail="item_ids must be a list of item ids")
         try:
-            out = store.move_items(ids, str(body.get("bin_id") or ""), actor=ACTOR)
+            out = store.move_items(
+                ids, str(body.get("bin_id") or ""), actor=ACTOR, put_away=as_flag(body.get("put_away"))
+            )
         except InventoryError as exc:
             _raise(exc)
-        for i in out["moved"]:
+        for i in dict.fromkeys(out["moved"] + out["now_available"]):
             emit("item.changed", {"id": i, "action": "move", "bin_id": out["bin_id"]})
         return out
 
