@@ -21,8 +21,11 @@ def test_register_contributes_tools_router_skills(registry):
         "inventory_set_price",
         "inventory_mark_sold",
         "inventory_import_csv",
+        "inventory_sale_candidates",
+        "inventory_sale_propose",
+        "inventory_sale_fail",
     } <= names
-    assert len(names) == 23
+    assert len(names) == 26
     assert {prefix for _, prefix in registry.routers} == {"/api/plugins/inventory", "/plugins/inventory"}
     assert "skills" in registry.skill_dirs
     for t in registry.tools:

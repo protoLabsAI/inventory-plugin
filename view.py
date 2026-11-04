@@ -110,11 +110,16 @@ PAGE = r"""<!doctype html>
   .sc-sum{margin:var(--pl-space-3) 0 0}
   .rgroup{display:grid;gap:var(--pl-space-2)}
   .sc-foot{flex-direction:column}
+  .next-acts{display:flex;align-items:center;gap:var(--pl-space-3);flex-wrap:wrap;padding:var(--pl-space-2) 0 var(--pl-space-3)}
+  .pline{border:var(--pl-border-width) solid var(--pl-color-border);border-radius:var(--pl-radius);padding:var(--pl-space-3);margin-top:var(--pl-space-3)}
+  .pline .form{margin-top:var(--pl-space-2)}
+  .pline-net{display:flex;justify-content:space-between;align-items:baseline;margin-top:var(--pl-space-2)}
   .frow{display:flex;gap:var(--pl-space-2);width:100%}
   .frow > *{flex:1 1 0}
   .scanbar{display:none}
   @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}.view .scan-top{display:none}.binsel{min-height:var(--pl-space-12)}.scanbar{display:block;padding:var(--pl-space-2) var(--pl-space-4) calc(var(--pl-space-2) + env(safe-area-inset-bottom));border-top:var(--pl-border-width) solid var(--pl-color-border);background:var(--pl-color-bg)}}
   @media (max-width:999px){.col-lot{display:none}}
+  @media (max-width:639px){.pline .form{grid-template-columns:1fr 1fr}}
   @media (prefers-reduced-motion:reduce){*{animation:none;transition:none}}
 </style>
 <script>
@@ -168,7 +173,7 @@ PAGE = r"""<!doctype html>
   const ROW_CAP = 5;
   // The usual shorthand for a miniature's state, offered as suggestions next to whatever is already in use.
   const CONDITION_CODES = ["NoS", "NIB", "Sealed", "Assembled", "Primed", "Painted", "Used"];
-  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
+  const state = { tab: "next", lots: [], items: [], systems: [], conditions: [], bins: [], unbinned: 0, toPack: [], toEnd: [], pastes: [], scans: [], threshold: 0.7, drafts: {}, maxBulk: 10, selected: new Set(), summary: null, drawer: null, moveTo: "", f: { seg: "sale", system: "", lot: "", bin: "", q: "", preset: "" } };
   const mq = globalThis.matchMedia ? globalThis.matchMedia("(max-width:639px)") : null;
   const narrow = () => !!(mq && mq.matches);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -266,8 +271,10 @@ PAGE = r"""<!doctype html>
     const snap = c.snapshot || {};
     const who = nameOf(a.entity_id) || c.name || snap.name || (snap.item && snap.item.name) || a.entity_id;
     if (a.entity === "sale" && a.action !== "packed") return "Sold " + (nameOf(c.item_id) || c.item_id || "an item") + " for " + whole(c.price) + (c.channel ? " on " + c.channel : "") + ", net " + whole(c.net);
+    if (a.entity === "paste") return ({ create: "Pasted an order to record", propose: "Read a pasted order", fail: "Couldn't read a pasted order", retry: "Asked again to read a pasted order", record: "Recorded the sales from a pasted order", discard: "Discarded a pasted order" }[a.action] || "Pasted order updated") + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
+    if (a.entity === "listing" && a.action === "needs_end") return "Listing " + a.entity_id + " is still up after a sale" + (c.sold_on ? " on " + c.sold_on : "") + ": end it there";
     if (a.entity === "listing") return a.action === "end" ? "Listing " + a.entity_id + " ended" + (c.state ? " (" + c.state + ")" : "") : "Listed " + (nameOf(c.item_id) || c.item_id || "an item") + (c.channel ? " on " + c.channel : "");
-    if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
+    if (a.entity === "draft") return ({ request: "Asked for a listing draft for ", write: "Listing draft written for ", fail: "Listing draft failed for ", copy: "Copied the listing draft for ", live: "Marked live on eBay: ", sku: "Updated the eBay custom label for " }[a.action] || "Listing draft updated: ") + who + (a.action === "fail" && c.reason ? " (" + clean(c.reason) + ")" : "");
     if (a.entity === "bin" && a.action === "labels") return "Printed the label for bin " + a.entity_id;
     if (a.entity === "bin") return (a.action === "create" ? "Made bin " : a.action === "delete" ? "Removed bin " : "Updated bin ") + a.entity_id + (c.label ? " (" + clean(c.label) + ")" : "");
     if (a.entity === "sale" && a.action === "packed") return "Packed " + (nameOf(c.item_id) || c.item_id || "an item");
@@ -340,6 +347,7 @@ PAGE = r"""<!doctype html>
       stopPoll();
       if (SC.id && !(SC.data && SC.data.finished_at)) { toast("Saved. Pick it up from Next, under Needs a look"); setTimeout(refresh, 0); }
     }
+    if (state.drawer && state.drawer.kind === "paste") pasteStopPoll();
     state.drawer = null; $("#overlay-root").innerHTML = "";
     const again = lastFocus && lastFocus.dataset && lastFocus.dataset.item ? document.querySelector('[data-item="' + CSS.escape(lastFocus.dataset.item) + '"]') : lastFocus;
     if (again && again.isConnected) again.focus();
@@ -440,6 +448,7 @@ PAGE = r"""<!doctype html>
     return cpRow("title", "Title", d.title, '<span class="muted cnt' + (n > TITLE_MAX ? " neg" : "") + '">' + n + " / " + TITLE_MAX + " characters</span>") +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Price</span><span class="money">' + esc(fmt(it.target)) + '</span><span class="irow-sub">' + esc(it.price_basis ? "Basis: " + clip(it.price_basis, 140) : "No basis recorded") + '</span><span class="irow-sub">Change it with Set price.</span></div>' + '<button class="pl-btn pl-btn--sm tall" data-act="dcopy" data-k="price">Copy price</button></div>' +
       cpRow("description", "Description", d.description) +
+      cpRow("sku", "Custom label (SKU)", d.sku, '<span class="irow-sub">Bin first, so eBay\'s pick list says where it lives. Paste it into Custom label.</span>') +
       '<div class="cprow"><div class="irow-main"><span class="pl-field__label">Photos</span><span class="irow-sub">' + (nPhotos ? nPhotos + " photo" + (nPhotos === 1 ? "" : "s") + ", metadata stripped, cover first" : "No photos from a scan") + "</span></div>" + (nPhotos ? '<button class="pl-btn pl-btn--sm tall" data-act="dphotos" data-id="' + esc(it.id) + '">Download photos</button>' : "") + "</div>" +
       (d.notes ? '<p class="basis notes muted">' + esc(d.notes) + "</p>" : "") +
       '<div class="drow gap-t">' + '<button class="pl-btn pl-btn--sm pl-btn--primary" data-act="dlive" data-id="' + esc(it.id) + '">I listed it</button>' + ask("Regenerate", "redraft") + "</div>" +
@@ -468,11 +477,11 @@ PAGE = r"""<!doctype html>
   async function copyDraft(btn) {
     const d = state.openDraft; const it = d && state.items.find((i) => i.id === d.item_id); if (!d || !it) return;
     const k = btn.dataset.k;
-    const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : d.description;
+    const text = k === "price" ? (Math.round(it.target * 100) / 100).toFixed(2).replace(/\.00$/, "") : k === "title" ? d.title : k === "sku" ? d.sku : d.description;
     const ok = await copyText(text);
     if (!ok) return toast("Couldn't copy here. Select the text and copy it.", "warning");
     const was = btn.textContent; btn.textContent = "Copied"; setTimeout(() => { if (btn.isConnected) btn.textContent = was; }, 2000);
-    if (d.state === "draft") {
+    if (d.state === "draft" || k === "sku") {
       try { const { draft } = await api("/items/" + encodeURIComponent(d.item_id) + "/draft/copied", "POST", { what: k }); state.openDraft = draft; state.drafts[d.item_id] = draft; const b = document.querySelector("#lsec .dh .pl-badge"); if (b) b.outerHTML = draftBadge(draft.listing_state); }
       catch (e) { /* the copy worked; the state catches up on the next load */ }
     }
@@ -505,7 +514,7 @@ PAGE = r"""<!doctype html>
   }
 
   function itemBody(it, audit, draft = null) {
-    const live = (it.listings || []).filter((l) => l.state === "active");
+    const live = (it.listings || []).filter((l) => l.state === "active" || l.state === "needs_end");
     const obs = (it.observations || [])[0];
     let h = '<div class="dsec"><div class="drow">' + badge(it.status) + (it.quantity > 1 ? '<span class="muted">×' + esc(it.quantity) + "</span>" : "") + (isStale(it) ? staleBadge : "") + "</div>";
     if (it.status === "sold") {
@@ -518,7 +527,7 @@ PAGE = r"""<!doctype html>
       '<div class="muted">' + esc([it.price_updated_on, obs && obs.n ? obs.n + " comps" : ""].filter(Boolean).join(" · ")) + "</div>" +
       '<div class="drow"></div><button class="pl-btn pl-btn--sm" data-act="price" data-id="' + esc(it.id) + '">Set price</button></div>';
     h += '<div class="dsec" id="lsec"><h3 class="dh">Listing' + (draft && LSTATE[draft.listing_state] ? " " + draftBadge(draft.listing_state) : "") + "</h3>" +
-      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + "</span></div>").join("") : "") +
+      (live.length ? live.map((l) => '<div class="kv"><span class="muted">' + esc(l.channel) + "</span><span>" + esc(whole(l.price)) + (l.url ? ' · <a href="' + esc(/^https?:\/\//.test(l.url) ? l.url : "#") + '" target="_blank" rel="noopener">Open</a>' : "") + (l.state === "needs_end" ? ' <span class="pl-badge pl-badge--warning">still up: end it</span> <button class="pl-btn pl-btn--sm" data-act="ended" data-id="' + esc(l.id) + '">I ended it</button>' : "") + "</span></div>").join("") : "") +
       draftBody(it, draft) +
       (["sold", "kept", "withdrawn"].includes(it.status) ? "" : '<div class="drow gap-t"><button class="pl-btn pl-btn--sm pl-btn--ghost" data-act="list" data-id="' + esc(it.id) + '">Add a listing by hand</button></div>') + "</div>";
     h += '<div class="dsec"><h3 class="dh">Details</h3>' +
@@ -569,12 +578,14 @@ PAGE = r"""<!doctype html>
 
   // ── loads ────────────────────────────────────────────────────────────────────
   async function loadCore() {
-    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({}))]);
+    const [lots, summary, items, systems, conditions, bins, toPack, scans, drafts, vcfg, toEnd, pastes] = await Promise.all([api("/lots"), api("/summary"), api("/items?limit=5000"), api("/systems").catch(() => ({ systems: [] })), api("/conditions").catch(() => ({ conditions: [] })), api("/bins"), api("/to-pack"), api("/scans").catch(() => ({ scans: [], threshold: 0.7 })), api("/drafts").catch(() => ({ drafts: [], max_bulk: 10 })), api("/view-config").catch(() => ({})), api("/listings/to-end").catch(() => ({ listings: [] })), api("/sale-pastes").catch(() => ({ pastes: [] }))]);
     state.lots = lots.lots; state.summary = summary; state.items = items.items; state.systems = systems.systems || []; state.conditions = conditions.conditions || [];
     state.bins = bins.bins; state.unbinned = bins.unbinned_unsold; state.toPack = toPack.sales;
     state.scans = scans.scans || []; if (typeof scans.threshold === "number") state.threshold = scans.threshold;
     if (vcfg && Number(vcfg.stale_price_days) > 0) STALE_DAYS = Number(vcfg.stale_price_days);
     state.drafts = Object.fromEntries((drafts.drafts || []).map((d) => [d.item_id, d])); state.maxBulk = drafts.max_bulk || 10;
+    state.toEnd = (toEnd && toEnd.listings) || [];
+    state.pastes = (pastes && pastes.pastes) || [];
   }
   // A scanned bin label lands here as ?bin=B07 (the console forwards it to this frame).
   const START_BIN = (() => { try { return (new URLSearchParams(location.search || "").get("bin") || "").trim().toUpperCase(); } catch { return ""; } })();
@@ -609,6 +620,7 @@ PAGE = r"""<!doctype html>
       else if (d && d.kind === "history") openHistory();
       else if (d && d.kind === "scan") scPaint();
       else if (d && d.kind === "putaway") paPaint();
+      else if (d && d.kind === "paste") pastePaint();
     } catch (e) { if (mine === inflight) { showErr(e); render(); } }
   }
 
@@ -638,9 +650,21 @@ PAGE = r"""<!doctype html>
   function sec(title, n, rows, see, extra = "") {
     return '<section class="sec"><div class="sec-head"><h2 class="sec-title">' + esc(title) + ' <span class="muted">' + n + "</span></h2>" + (see || extra ? '<span class="row-acts">' + extra + (see ? '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-see="' + see + '">See all ' + n + "</button>" : "") + "</span>" : "") + '</div><ul class="list">' + rows + "</ul></section>";
   }
+  // The double-sell guard: an item that sold somewhere else is still up on this marketplace.
+  // Nothing here can take a listing down, so the operator ends it there and says so.
+  const safeUrl = (u) => (/^https?:\/\//.test(String(u || "")) ? String(u) : "");
+  function toEndRows(xs) {
+    return xs.map((l) => '<li><div class="irow"><span class="irow-main"><span class="irow-name">' + esc(l.item_name) + '</span><span class="irow-sub">' +
+      esc(["sold" + (l.sold_on ? " " + l.sold_on : "") + (l.sold_channel ? " on " + l.sold_channel : ""), "still up on " + l.channel].join(" · ")) + "</span></span>" +
+      (safeUrl(l.url) ? '<a class="pl-btn pl-btn--sm" href="' + esc(safeUrl(l.url)) + '" target="_blank" rel="noopener">Open listing</a>' : "") +
+      '</div><button class="pl-btn pl-btn--sm pl-btn--primary rowact" data-act="ended" data-id="' + esc(l.id) + '" aria-label="I ended the listing for ' + esc(l.item_name) + '">I ended it</button></li>').join("");
+  }
   function renderNext() {
     const items = state.items;
     let h = "";
+    h += '<div class="next-acts"><button class="pl-btn pl-btn--sm" data-act="pastesale">Record a sale</button><span class="muted">Paste an order or a note; the agent fills it in for you to check.</span></div>';
+    if (state.toEnd && state.toEnd.length) h += sec("End these listings", state.toEnd.length, toEndRows(state.toEnd), "");
+    if (state.pastes.length) h += sec("Sales to check", state.pastes.length, state.pastes.slice(0, ROW_CAP).map((p) => '<li><button class="irow" data-act="openpaste" data-id="' + esc(p.id) + '"><span class="irow-main"><span class="irow-name">' + esc(pasteTitle(p)) + '</span><span class="irow-sub">' + esc(pasteSub(p)) + "</span></span>" + (p.state === "proposed" ? '<span class="pl-badge pl-badge--info">ready</span>' : p.state === "failed" ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join(""), "");
     if (state.toPack.length) {
       const rows = packGroups(state.toPack).map(([bin, sales]) => '<li class="group-label"><span class="pl-eyebrow">' + esc(bin ? binText(bin) : "No bin recorded") + "</span></li>" +
         sales.map((sl) => '<li><button class="irow" data-item="' + esc(sl.item_id) + '"><span class="irow-main"><span class="irow-name">' + esc(sl.item_name) + (sl.quantity > 1 ? ' <span class="muted">×' + esc(sl.quantity) + "</span>" : "") + '</span><span class="irow-sub">' + esc(["sold " + sl.sold_on, sl.channel].filter(Boolean).join(" · ")) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="packed" data-id="' + esc(sl.id) + '" aria-label="Packed: ' + esc(sl.item_name) + '">Packed</button></li>').join("")).join("");
@@ -650,6 +674,8 @@ PAGE = r"""<!doctype html>
       const rows = state.scans.slice(0, ROW_CAP).map((s) => '<li><button class="irow" data-act="resumescan" data-id="' + esc(s.id) + '"><span class="irow-main"><span class="irow-name">' + esc(scanTitle(s)) + '</span><span class="irow-sub">' + esc(scanSub(s)) + "</span></span>" + (scanNeedsCheck(s) ? '<span class="pl-badge pl-badge--warning">check</span>' : "") + "</button></li>").join("");
       h += sec("Needs a look", state.scans.length, rows, "");
     }
+    const moved = items.filter((i) => state.drafts[i.id] && state.drafts[i.id].sku_stale);
+    if (moved.length) h += sec("Update the custom label on eBay", moved.length, moved.slice(0, ROW_CAP).map((i) => '<li><button class="irow" data-item="' + esc(i.id) + '"><span class="irow-main"><span class="irow-name">' + esc(i.name) + '</span><span class="irow-sub">moved bins · now ' + esc(state.drafts[i.id].sku) + '</span></span></button><button class="pl-btn pl-btn--sm rowact" data-act="skucopy" data-id="' + esc(i.id) + '">Copy</button><button class="pl-btn pl-btn--sm rowact" data-act="skudone" data-id="' + esc(i.id) + '">Done</button></li>').join(""), "");
     const stuck = items.filter((i) => i.status === "available" && state.drafts[i.id] && state.drafts[i.id].copied_stale);
     if (stuck.length) h += sec("Copied, not live yet", stuck.length, stuck.slice(0, ROW_CAP).map((i) => "<li>" + itemButton(i, "copied " + String(state.drafts[i.id].copied_at).slice(0, 10) + " · did it go live?") + "</li>").join(""), "");
     const ready = readyToList(items);
@@ -678,7 +704,7 @@ PAGE = r"""<!doctype html>
       : '<li><button class="irow" data-tab="bins"><span class="irow-main">' + state.unbinned + " unsold item" + (state.unbinned === 1 ? " has" : "s have") + ' no location yet</span><span class="muted">Make bins</span></button></li>');
     if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
-    return h || '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
+    return h.indexOf('class="sec"') >= 0 ? h : h + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
   }
   function chipsHtml() {
     const f = state.f, chips = [];
@@ -884,11 +910,11 @@ PAGE = r"""<!doctype html>
     const it = itemById(id); if (!it) return;
     await dialog({
       title: "Mark sold · " + it.name, submit: "Record sale",
-      body: field("price", "Sold for ($)", it.target ?? "", { type: "number", step: "0.01", required: true }) + field("channel", "Channel", "eBay", { required: true, placeholder: "eBay, Facebook, local, r/miniswap" }) +
+      body: '<div class="span2"><button class="pl-btn pl-btn--sm pl-btn--ghost" type="button" data-act="pastesale" data-id="' + esc(id) + '">Paste the order instead</button></div>' + field("price", "Sold for ($)", it.target ?? "", { type: "number", step: "0.01", required: true }) + field("channel", "Channel", "eBay", { required: true, placeholder: "eBay, Facebook, local, r/miniswap" }) +
         field("sold_on", "Sold on", new Date().toISOString().slice(0, 10)) + field("quantity", "Quantity", 1, { type: "number", step: "1" }) +
         field("shipping_charged", "Shipping charged ($)", "", { type: "number", step: "0.01" }) + field("fees", "Fees ($)", "", { type: "number", step: "0.01", hint: "Marketplace + payment fees." }) +
         field("shipping_cost", "Shipping cost ($)", "", { type: "number", step: "0.01" }) + field("notes", "Notes", "") +
-        '<div class="span2 muted">net = price + shipping charged − fees − shipping cost. Live listings are closed.</div>',
+        '<div class="span2 muted">net = price + shipping charged − fees − shipping cost. A live listing on the same channel closes; one anywhere else shows on Next to end.</div>',
       onSubmit: async (v) => {
         const r = await api("/items/" + encodeURIComponent(id) + "/sold", "POST", { price: num(v.price), channel: v.channel, sold_on: v.sold_on, quantity: Number(v.quantity || 1), shipping_charged: num(v.shipping_charged) || 0, fees: num(v.fees) || 0, shipping_cost: num(v.shipping_cost) || 0, notes: v.notes });
         toast("Sold — net " + fmt(r.sale.net), "success"); await refresh();
@@ -1030,6 +1056,111 @@ PAGE = r"""<!doctype html>
       toast("Moved " + r.moved.length + " to " + to, "success");
       endMove(); await refresh(); go("bins"); openBin(to);
     } catch (e) { toast(e.message, "error"); }
+  }
+  // ── pasted sales: paste an order, the agent proposes the lines, the operator records ─────
+  const PS = { id: "", data: null, timer: 0, lines: null };
+  const pasteTitle = (p) => { const ls = (p.proposal && p.proposal.lines) || []; return ls.length ? ls.map((l) => l.item_name).slice(0, 2).join(", ") + (ls.length > 2 ? " +" + (ls.length - 2) : "") : "Pasted order"; };
+  const pasteSub = (p) => p.state === "parsing" ? "reading…" : p.state === "failed" ? (p.reason || "couldn't read it") : ((p.proposal && p.proposal.lines || []).length + " sale" + ((p.proposal && p.proposal.lines || []).length === 1 ? "" : "s") + " to check · " + String(p.created_at || "").slice(0, 10));
+  async function pasteDialog(itemId) {
+    const it = itemId ? itemById(itemId) : null;
+    await dialog({
+      title: it ? "Record a sale · " + it.name : "Record a sale", submit: "Read it",
+      body: field("text", "Paste the order", "", { type: "textarea", span2: true, placeholder: "An eBay order email or Seller Hub row, an app's share text, or a note: \"sold the dice for $70 + $9 shipping, personal connection\"" }) +
+        '<div class="span2 muted">The agent matches it to your stock and fills in the sale. Nothing is recorded until you check it.</div>',
+      onSubmit: async (v) => {
+        if (!clean(v.text)) { toast("Paste the order first", "warning"); return false; }
+        const { paste } = await api("/sale-pastes", "POST", { text: v.text, item_id: itemId || "" });
+        setTimeout(() => openPaste(paste.id), 0);
+      },
+    });
+  }
+  async function openPaste(id) {
+    ++drawerSeq; state.drawer = { kind: "paste", id }; PS.id = id; PS.data = null; PS.lines = null;
+    paintDrawer("Record a sale", '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span></div>');
+    await pastePaint();
+  }
+  function pasteStopPoll() { if (PS.timer) clearTimeout(PS.timer); PS.timer = 0; }
+  async function pastePaint() {
+    if (!state.drawer || state.drawer.kind !== "paste") return;
+    const seq = drawerSeq, id = state.drawer.id;
+    let p; try { p = (await api("/sale-pastes/" + encodeURIComponent(id))).paste; } catch (e) { return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--error"><div class="pl-callout__body">' + esc(e.message) + "</div></div>"); }
+    if (seq !== drawerSeq) return;
+    PS.data = p;
+    pasteStopPoll();
+    const said = '<details class="gap-t"><summary class="muted">What you pasted</summary><p class="basis pre">' + esc(p.text) + "</p></details>";
+    if (p.state === "parsing") {
+      paintDrawer("Record a sale", '<div class="pl-skel-lines" aria-hidden="true"><span class="pl-skel skel-line w60"></span><span class="pl-skel skel-line w40"></span></div><p class="muted" role="status">Reading the order… usually under a minute. You can close this; it waits on Next.</p>' + said, '<div class="foot sc-foot"><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard</button></div>');
+      PS.timer = setTimeout(() => { if (seq === drawerSeq && !document.hidden) pastePaint(); else if (seq === drawerSeq) PS.timer = setTimeout(pastePaint, POLL_MS); }, POLL_MS);
+      return;
+    }
+    if (p.state === "failed") {
+      return paintDrawer("Record a sale", '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body">' + esc(p.reason || "Couldn't read that order.") + "</div></div>" + said,
+        '<div class="foot sc-foot"><button class="pl-btn pl-btn--primary block" data-act="paste-retry">Try again</button>' + (p.item_hint ? '<button class="pl-btn block" data-act="paste-byhand" data-id="' + esc(p.item_hint) + '">Enter it by hand</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard</button></div>');
+    }
+    if (p.state !== "proposed") return paintDrawer("Record a sale", '<p class="muted">This paste is ' + esc(p.state) + ".</p>" + said);
+    const pr = p.proposal || {};
+    if (!PS.lines) PS.lines = (pr.lines || []).map((l) => Object.assign({}, l));
+    const qs = (pr.questions || []).length ? '<div class="pl-callout pl-callout--warning"><div class="pl-callout__body"><strong>Check:</strong> ' + pr.questions.map(esc).join(" · ") + "</div></div>" : "";
+    const low = pr.confidence < state.threshold ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Not sure about this one (' + Math.round(pr.confidence * 100) + "%). Check each line.</div></div>" : "";
+    const notes = pr.notes ? '<p class="basis notes muted">' + esc(pr.notes) + "</p>" : "";
+    const body = qs + low + '<div id="paste-lines">' + PS.lines.map(pasteLine).join("") + "</div>" + notes + said;
+    const n = PS.lines.length;
+    const foot = '<div class="foot sc-foot"><button class="pl-btn pl-btn--primary block" data-act="paste-record"' + (n ? "" : " disabled") + ">Record " + n + " sale" + (n === 1 ? "" : "s") + '</button><button class="pl-btn pl-btn--ghost block" data-act="paste-discard">Discard</button></div>';
+    paintDrawer("Record a sale", body, foot);
+    pasteNets();
+  }
+  function pasteItemOptions(current) {
+    const xs = state.items.filter((i) => UNSOLD.includes(i.status) || i.id === current).sort((a, b) => (a.id === current ? -1 : b.id === current ? 1 : a.name.localeCompare(b.name)));
+    // Labels go through field(), which escapes every option.
+    return xs.map((i) => [i.id, [i.name, i.condition, i.bin_id ? binText(i.bin_id) : ""].filter(Boolean).join(" · ")]);
+  }
+  function pasteLine(l, i) {
+    const f = (k, label, val, opts = {}) => field("pl" + i + "_" + k, label, val ?? "", opts);
+    const money = { type: "number", step: "0.01", inputmode: "decimal" };
+    return '<div class="pline" data-line="' + i + '">' +
+      '<div class="drow"><span class="pl-eyebrow">Sale ' + (i + 1) + '</span>' + (l.recorded_sale_id ? '<span class="pl-badge pl-badge--success">recorded</span>' : '<button class="pl-btn pl-btn--ghost pl-btn--xs" data-act="paste-drop" data-id="' + i + '">Remove</button>') + "</div>" +
+      '<div class="form">' + f("item_id", "Item", l.item_id, { type: "select", options: pasteItemOptions(l.item_id), span2: true }) +
+      f("price", "Sold for ($)", l.price, money) + f("quantity", "Quantity", l.quantity || 1, { type: "number", step: "1" }) +
+      f("shipping_charged", "Shipping charged ($)", l.shipping_charged, money) + f("fees", "Fees ($)", l.fees, Object.assign({ hint: l.fees_estimated ? "Estimated from the fee schedule" : "" }, money)) +
+      f("shipping_cost", "Postage paid ($)", l.shipping_cost, money) + f("channel", "Channel", l.channel) +
+      f("sold_on", "Sold on", l.sold_on, { type: "date" }) + "</div>" +
+      (l.notes ? '<p class="basis notes muted">' + esc(l.notes) + "</p>" : "") +
+      '<div class="pline-net"><span class="muted">Net</span><span class="money" data-net="' + i + '"></span></div></div>';
+  }
+  function pasteRead() {
+    return PS.lines.map((l, i) => {
+      const g = (k) => { const el = document.getElementById("f_pl" + i + "_" + k); return el ? el.value : ""; };
+      const fees = num(g("fees")) || 0;
+      // A fee the operator typed is theirs, not the schedule's estimate.
+      const estimated = Boolean(l.fees_estimated) && Math.abs(fees - (Number(l.fees) || 0)) < 0.005;
+      return Object.assign({}, l, { item_id: g("item_id"), price: num(g("price")), quantity: Number(g("quantity") || 1), shipping_charged: num(g("shipping_charged")) || 0, fees, fees_estimated: estimated, shipping_cost: num(g("shipping_cost")) || 0, channel: g("channel"), sold_on: g("sold_on") });
+    });
+  }
+  function pasteNets() {
+    if (!PS.lines || !document.getElementById("paste-lines")) return;
+    pasteRead().forEach((l, i) => { const el = document.querySelector('[data-net="' + i + '"]'); if (el) el.textContent = fmt(Math.round(((l.price || 0) + l.shipping_charged - l.fees - l.shipping_cost) * 100) / 100); });
+  }
+  function dropPasteLine(i) { PS.lines = pasteRead(); PS.lines.splice(i, 1); pastePaint(); }
+  async function recordPaste() {
+    const lines = pasteRead();
+    if (!lines.length) return toast("No sales left to record", "warning");
+    try {
+      const { paste } = await api("/sale-pastes/" + encodeURIComponent(PS.id) + "/record", "POST", { lines });
+      const net = (paste.sales || []).reduce((a, s) => a + (s.net || 0), 0);
+      toast("Recorded " + (paste.sales || []).length + " sale" + ((paste.sales || []).length === 1 ? "" : "s") + " · net " + fmt(Math.round(net * 100) / 100), "success");
+      pasteStopPoll(); closeDrawer(); await refresh();
+    } catch (e) { PS.lines = lines; toast(e.message, "error"); }
+  }
+  async function retryPaste() { try { await api("/sale-pastes/" + encodeURIComponent(PS.id) + "/retry", "POST"); } catch (e) { return toast(e.message, "error"); } pastePaint(); }
+  async function discardPaste() {
+    if (!(await confirm("Discard this pasted order?", "Nothing gets recorded from it."))) return;
+    try { await api("/sale-pastes/" + encodeURIComponent(PS.id), "DELETE"); } catch (e) { return toast(e.message, "error"); }
+    pasteStopPoll(); closeDrawer(); await refresh();
+  }
+  async function endedListing(listingId) {
+    try { await api("/listings/" + encodeURIComponent(listingId) + "/end", "POST", { state: "ended" }); }
+    catch (e) { return toast(e.message, "error"); }
+    toast("Marked ended", "success"); await refresh();
   }
   async function packed(saleId) {
     try { await api("/sales/" + encodeURIComponent(saleId) + "/packed", "POST"); toast("Packed", "success"); } catch (e) { toast(e.message, "error"); }
@@ -1541,7 +1672,7 @@ PAGE = r"""<!doctype html>
   };
 
   // ── wiring ───────────────────────────────────────────────────────────────────
-  const MENU = [["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
+  const MENU = [["Record a sale", () => pasteDialog("")], ["Add item by hand", () => itemDialog(null)], ["New lot", () => lotDialog(null)], ["New bins", () => newBinsDialog()], ["Print bin labels", () => labelsDialog()], ["Import CSV", importDialog], ["Export CSV", exportCsv], ["History", openHistory]];
   const ACTS = {
     close: closeDrawer,
     price: (id) => priceDialog(id), sold: (id) => soldDialog(id), list: (id) => listingDialog(id),
@@ -1556,6 +1687,13 @@ PAGE = r"""<!doctype html>
     copybin: (id) => copyItems(state.items.filter((i) => i.bin_id === id && forSale(i)).map((i) => i.id)),
     binstock: (id) => { endMove(); Object.assign(state.f, { seg: "all", preset: "", system: "", lot: "", q: "", bin: id }); closeDrawer(); go("stock"); },
     packed: (id) => packed(id),
+    ended: (id) => endedListing(id),
+    pastesale: (id) => { const x = document.querySelector("#dialog-root [data-x]"); if (x) x.click(); return pasteDialog(id || ""); },
+    openpaste: (id) => openPaste(id),
+    skucopy: async (id) => { const d = state.drafts[id]; if (!d) return; toast((await copyText(d.sku)) ? "Copied " + d.sku : "Couldn't copy here. Select the label and copy it.", "info"); },
+    skudone: async (id) => { try { await api("/items/" + encodeURIComponent(id) + "/draft/sku-updated", "POST"); } catch (e) { return toast(e.message, "error"); } await refresh(); },
+    "paste-record": () => recordPaste(), "paste-retry": () => retryPaste(), "paste-discard": () => discardPaste(),
+    "paste-byhand": (id) => { closeDrawer(); return soldDialog(id); }, "paste-drop": (i) => dropPasteLine(Number(i)),
     "ask-reprice": () => composeToChat(repriceText(state.items.filter((i) => isStale(i)).sort((a, b) => daysOld(b.price_updated_on) - daysOld(a.price_updated_on)))),
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
@@ -1605,7 +1743,7 @@ PAGE = r"""<!doctype html>
       if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
     });
-    document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } });
+    document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } if (e.target.closest && e.target.closest("#paste-lines")) pasteNets(); });
     document.addEventListener("keydown", (e) => {
       const dialogOpen = !!$("#dialog-root").innerHTML;
       if (e.key === "Escape" && state.drawer && !dialogOpen) return closeDrawer();

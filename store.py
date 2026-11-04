@@ -40,7 +40,11 @@ STATUSES = ("planned", "available", "listed", "pending", "sold", "kept", "withdr
 UNSOLD = ("planned", "available", "listed", "pending")
 #: States an item cannot be sold or listed from.
 CLOSED = ("sold", "kept", "withdrawn")
-LISTING_STATES = ("active", "ended", "sold")
+#: ``needs_end`` (0.12.0): the item sold somewhere else while this listing was live, so the
+#: marketplace still shows it for sale. It stays on the books until the operator ends it there
+#: ("I ended it" → ``ended``). The double-sell guard: a sale never silently closes a listing on
+#: another channel, because nothing here can take that listing down for you.
+LISTING_STATES = ("active", "ended", "sold", "needs_end")
 OBSERVATION_SOURCES = ("ebay_sold", "ebay_active", "amazon", "retail", "manual", "other")
 OBSERVATION_FIELDS = ("source", "n", "p25", "median", "p75", "query", "basis", "notes")
 
@@ -162,6 +166,19 @@ CREATE TABLE IF NOT EXISTS drafts (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sale_pastes (
+  id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'parsing',
+  text TEXT NOT NULL DEFAULT '',
+  item_hint TEXT NOT NULL DEFAULT '',
+  proposal TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  sale_ids TEXT NOT NULL DEFAULT '[]',
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -195,6 +212,9 @@ _MIGRATIONS: list[tuple[str, str, tuple[str, ...]]] = [
     ("bins", "labels_printed_on", ("ALTER TABLE bins ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
     # 0.10.0 — when an item's own sticker was last put on a printable sheet ('' = never).
     ("items", "labels_printed_on", ("ALTER TABLE items ADD COLUMN labels_printed_on TEXT NOT NULL DEFAULT ''",)),
+    # 0.12.0 — the Custom label (SKU) the operator last copied into eBay for this draft ('' = never),
+    # so Next can ask them to update it there when the item moves to another bin.
+    ("drafts", "sku_copied", ("ALTER TABLE drafts ADD COLUMN sku_copied TEXT NOT NULL DEFAULT ''",)),
 ]
 _POST_MIGRATION = "CREATE INDEX IF NOT EXISTS ix_items_bin ON items(bin_id);"
 
@@ -224,6 +244,70 @@ SCAN_TIMEOUT_MINUTES = 10
 _SCAN_ID_RE = re.compile(r"^S[0-9A-F]{10}$")
 _PHOTO_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _PHOTO_TYPES = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+
+
+# ── pasted sales (0.12.0) ─────────────────────────────────────────────────────
+#: parsing → proposed → recorded; or failed (Try again) / discarded. The text is the operator's
+#: own order paste and stays in this database.
+PASTE_STATES = ("parsing", "proposed", "recorded", "failed", "discarded")
+MAX_PASTE_CHARS = 8000
+MAX_PASTE_LINES = 20
+#: A parse still running after this long shows as failed (Try again).
+PASTE_TIMEOUT_MINUTES = 10
+_PASTE_ID_RE = re.compile(r"^P[0-9A-F]{10}$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+#: "Mon, Dec 23" / "Delivered Mon Dec 23" / "Monday, December 23" — a weekday + month + day with NO
+#: year: the shape that once got stamped with the wrong year (a 2024 delivery recorded as 2026-12-23).
+_DAY_MONTH_RE = re.compile(
+    r"\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b(?!,?\s*\d{4})",
+    re.IGNORECASE,
+)
+
+
+#: eBay's Custom label field is ``Item.SKU`` in the Trading API, "Maximum length: 50 characters"
+#: (developer.ebay.com/api-docs/user-guides/static/trading-user-guide/skus.html; KB 1037 maps the
+#: seller tools' "Custom label" to Item.SKU with the same limit).
+CUSTOM_LABEL_MAX = 50
+
+
+def custom_label(bin_id, item_id) -> str:
+    """The eBay Custom label (SKU) for an item: its bin FIRST, then its id (``B03-helsmiths…``),
+    so eBay's pick list and order search sort by where it lives. No bin → the id alone. The bin is
+    upper-cased (bins are); the id keeps its case. Capped at eBay's 50 characters, keeping the bin."""
+    iid = str(item_id or "").strip()
+    b = str(bin_id or "").strip().upper()
+    return ((b + "-" + iid) if b else iid)[:CUSTOM_LABEL_MAX]
+
+
+def new_paste_id() -> str:
+    return "P" + uuid.uuid4().hex[:10].upper()
+
+
+def paste_key(value) -> str:
+    key = str(value or "").strip().upper()
+    if not _PASTE_ID_RE.match(key):
+        raise InventoryError(f"no pasted sale {value!r}")
+    return key
+
+
+def weekday_conflict(text: str, iso: str) -> str:
+    """If the paste names a weekday + month + day with no year ("Mon Dec 23") and ``iso`` is that
+    month and day but falls on a DIFFERENT weekday, say so — the year was guessed wrong. ``""``
+    when there is nothing to check or it agrees."""
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    for m in _DAY_MONTH_RE.finditer(text or ""):
+        wd, mon, day = m.group(1).lower()[:3], _MONTHS.index(m.group(2).lower()[:3]) + 1, int(m.group(3))
+        if (d.month, d.day) == (mon, day) and _WEEKDAYS[d.weekday()] != wd:
+            return (
+                f"the paste says {m.group(0).strip()!r} but {iso} is a {d.strftime('%A')}; that date is in another "
+                "year. Use the year in which it falls on that weekday, or ask the operator"
+            )
+    return ""
 
 
 def new_scan_id() -> str:
@@ -348,6 +432,13 @@ def _scan_row_to_dict(r: sqlite3.Row, timeout_minutes: int = SCAN_TIMEOUT_MINUTE
         "created_at": d["created_at"],
         "updated_at": d["updated_at"],
     }
+
+
+def same_channel(a, b) -> bool:
+    """Two channel names are the same marketplace: case, spaces and punctuation don't count
+    ("eBay" = "ebay" = "E-Bay")."""
+    norm = lambda v: re.sub(r"[^a-z0-9]", "", str(v or "").lower())  # noqa: E731
+    return bool(norm(a)) and norm(a) == norm(b)
 
 
 def to_cents(value) -> int | None:
@@ -941,6 +1032,8 @@ class InventoryStore:
     def end_listing(self, listing_id: int, *, state: str = "ended", ended_on: str = "", actor: str = "") -> dict:
         if state == "sold":
             raise InventoryError("record the sale with mark_sold — it closes the listing as sold itself")
+        if state == "needs_end":
+            raise InventoryError("needs_end is set by a sale on another channel, not by hand")
         if state not in LISTING_STATES:
             raise InventoryError(f"unknown listing state {state!r}; one of ended")
         with self._tx() as con:
@@ -1014,6 +1107,7 @@ class InventoryStore:
                     f"item {item_id!r} is already {row['status']}{was}; pass force=True to record another sale"
                 )
             remaining = max(0, int(row["quantity"] or 1) - qty)
+            needs_end: list[int] = []
             cur = con.execute(
                 "INSERT INTO sales(item_id, channel, sold_on, price_cents, shipping_charged_cents, fees_cents, "
                 "shipping_cost_cents, net_cents, quantity, notes, packed_on) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -1036,10 +1130,20 @@ class InventoryStore:
                 con.execute("UPDATE items SET quantity=?, updated_at=? WHERE id=?", (remaining, ts, item_id))
             else:
                 con.execute("UPDATE items SET status='sold', updated_at=? WHERE id=?", (ts, item_id))
-                con.execute(
-                    "UPDATE listings SET state='sold', ended_on=? WHERE item_id=? AND state='active'",
-                    (sold_on or today_iso(), item_id),
-                )
+                # A live listing on the channel it sold on closes as sold. One on ANY OTHER channel is
+                # still up on that marketplace: flag it so Next asks the operator to end it there,
+                # rather than marking it closed when nothing has taken it down (the double-sell guard).
+                for lst in con.execute(
+                    "SELECT id, channel FROM listings WHERE item_id=? AND state='active'", (item_id,)
+                ).fetchall():
+                    if same_channel(lst["channel"], channel):
+                        con.execute(
+                            "UPDATE listings SET state='sold', ended_on=? WHERE id=?",
+                            (sold_on or today_iso(), lst["id"]),
+                        )
+                    else:
+                        con.execute("UPDATE listings SET state='needs_end' WHERE id=?", (lst["id"],))
+                        needs_end.append(lst["id"])
             self._audit(
                 con,
                 "sale",
@@ -1053,13 +1157,37 @@ class InventoryStore:
                     "net": dollars(net_c),
                     "quantity": qty,
                     "remaining": remaining,
+                    **({"needs_end": needs_end} if needs_end else {}),
                 },
             )
+            for lid in needs_end:
+                self._audit(con, "listing", lid, "needs_end", actor, {"sold_on": channel})
             out = con.execute("SELECT * FROM sales WHERE id=?", (cur.lastrowid,)).fetchone()
         sale = _sale_row_to_dict(out)
         sale["remaining_quantity"] = remaining
+        sale["needs_end"] = needs_end
         sale["item_status"] = "sold" if remaining == 0 else row["status"]
         return sale
+
+    def listings_to_end(self) -> list[dict]:
+        """Listings still up on a marketplace for an item that sold elsewhere (``needs_end``),
+        oldest first, each with the item's name and the sale that caused it."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT l.*, i.name AS item_name, i.bin_id AS bin_id FROM listings l "
+                "JOIN items i ON i.id = l.item_id WHERE l.state='needs_end' ORDER BY l.id"
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = _listing_row_to_dict(r)
+                d["item_name"] = r["item_name"]
+                sale = con.execute(
+                    "SELECT channel, sold_on FROM sales WHERE item_id=? ORDER BY id DESC LIMIT 1", (r["item_id"],)
+                ).fetchone()
+                d["sold_channel"] = sale["channel"] if sale else ""
+                d["sold_on"] = sale["sold_on"] if sale else ""
+                out.append(d)
+        return out
 
     def list_sales(self, *, lot_id: str = "", limit: int = 500) -> list[dict]:
         with self._read() as con:
@@ -1925,7 +2053,16 @@ class InventoryStore:
         else:
             listing_state = state
         copied_at = row["copied_at"] if row is not None else ""
+        sku = custom_label(item["bin_id"], item["id"])
+        sku_copied = row["sku_copied"] if row is not None else ""
         return {
+            "sku": sku,
+            "sku_copied": sku_copied,
+            # The label pasted into eBay no longer says where the item is: ask to update it there.
+            "sku_stale": bool(sku_copied)
+            and sku_copied != sku
+            and state in ("copied", "live")
+            and item["status"] != "sold",
             "item_id": item["id"],
             "state": state,
             "listing_state": listing_state,
@@ -1959,7 +2096,19 @@ class InventoryStore:
                     continue
                 d = self._draft_dict(con, item, row, timeout_minutes)
                 out.append(
-                    {k: d[k] for k in ("item_id", "state", "listing_state", "reason", "copied_at", "copied_stale")}
+                    {
+                        k: d[k]
+                        for k in (
+                            "item_id",
+                            "state",
+                            "listing_state",
+                            "reason",
+                            "copied_at",
+                            "copied_stale",
+                            "sku",
+                            "sku_stale",
+                        )
+                    }
                 )
             return out
 
@@ -2050,19 +2199,34 @@ class InventoryStore:
     def draft_copied(self, item_id: str, what: str, *, actor: str = "") -> dict:
         """The operator copied part of the draft. The first copy moves it to ``copied``, so Next
         can ask a day later whether it went live."""
-        if what not in ("title", "price", "description"):
-            raise InventoryError("copied what? title, price or description")
+        if what not in ("title", "price", "description", "sku"):
+            raise InventoryError("copied what? title, price, description or sku")
         with self._tx() as con:
             item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
             row = self._draft_row(con, item_id)
             if item is None or row is None or row["state"] not in ("draft", "copied"):
                 raise InventoryError(f"no draft to copy for {item_id!r}")
+            if what == "sku":
+                sku = custom_label(item["bin_id"], item["id"])
+                con.execute("UPDATE drafts SET sku_copied=?, updated_at=? WHERE item_id=?", (sku, now_iso(), item_id))
             if row["state"] == "draft":
                 ts = now_iso()
                 con.execute(
                     "UPDATE drafts SET state='copied', copied_at=?, updated_at=? WHERE item_id=?", (ts, ts, item_id)
                 )
                 self._audit(con, "draft", item_id, "copy", actor, {"what": what})
+            return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
+
+    def draft_sku_updated(self, item_id: str, *, actor: str = "") -> dict:
+        """The operator put the item's current Custom label into eBay (after it moved bins)."""
+        with self._tx() as con:
+            item = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            row = self._draft_row(con, item_id)
+            if item is None or row is None:
+                raise InventoryError(f"no draft for {item_id!r}")
+            sku = custom_label(item["bin_id"], item["id"])
+            con.execute("UPDATE drafts SET sku_copied=?, updated_at=? WHERE item_id=?", (sku, now_iso(), item_id))
+            self._audit(con, "draft", item_id, "sku", actor, {"sku": [row["sku_copied"], sku]})
             return self._draft_dict(con, item, self._draft_row(con, item_id), DRAFT_TIMEOUT_MINUTES)
 
     def draft_live(self, item_id: str, url: str, *, actor: str = "") -> dict:
@@ -2103,6 +2267,357 @@ class InventoryStore:
             if found:
                 out.append(found)
         return out
+
+    # ── pasted sales: the operator pastes an order, an agent turn proposes the sale(s) ────
+    def _paste_dict(self, row, timeout_minutes: int = PASTE_TIMEOUT_MINUTES) -> dict:
+        state, reason = row["state"], row["reason"]
+        if state == "parsing" and row["started_at"] and _age_over(row["started_at"], minutes=timeout_minutes):
+            state, reason = "failed", reason or "Reading the order didn't finish. Try again."
+        return {
+            "id": row["id"],
+            "state": state,
+            "text": row["text"],
+            "item_hint": row["item_hint"],
+            "proposal": _loads(row["proposal"], {}) or None,
+            "reason": reason,
+            "sale_ids": _loads(row["sale_ids"], []),
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "created_at": row["created_at"],
+        }
+
+    def _paste_row(self, con, paste_id: str):
+        row = con.execute("SELECT * FROM sale_pastes WHERE id=?", (paste_key(paste_id),)).fetchone()
+        if row is None:
+            raise InventoryError(f"no pasted sale {paste_id!r}")
+        return row
+
+    def create_paste(self, text: str, *, item_hint: str = "", actor: str = "") -> dict:
+        body = str(text or "").strip()
+        if not body:
+            raise InventoryError("paste the order first")
+        if len(body) > MAX_PASTE_CHARS:
+            raise InventoryError(f"that paste is over {MAX_PASTE_CHARS} characters; paste one order at a time")
+        hint = str(item_hint or "").strip()
+        with self._tx() as con:
+            if hint and con.execute("SELECT 1 FROM items WHERE id=?", (hint,)).fetchone() is None:
+                raise InventoryError(f"no item {hint!r}")
+            pid, ts = new_paste_id(), now_iso()
+            con.execute(
+                "INSERT INTO sale_pastes(id, state, text, item_hint, started_at, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (pid, "parsing", body, hint, ts, ts, ts),
+            )
+            self._audit(con, "paste", pid, "create", actor, {"chars": len(body), **({"item_id": hint} if hint else {})})
+            return self._paste_dict(self._paste_row(con, pid))
+
+    def get_paste(self, paste_id: str, *, timeout_minutes: int = PASTE_TIMEOUT_MINUTES) -> dict:
+        with self._read() as con:
+            return self._paste_dict(self._paste_row(con, paste_id), timeout_minutes)
+
+    def list_pastes(self, *, timeout_minutes: int = PASTE_TIMEOUT_MINUTES) -> list[dict]:
+        """Pastes still waiting on the operator (reading, ready to record, or failed in the last
+        week), newest first, without their text."""
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT * FROM sale_pastes WHERE state IN ('parsing','proposed','failed') AND created_at >= ? "
+                "ORDER BY created_at DESC",
+                ((datetime.now(UTC) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),),
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = self._paste_dict(r, timeout_minutes)
+                d.pop("text")
+                out.append(d)
+        return out
+
+    def retry_paste(self, paste_id: str, *, actor: str = "") -> dict:
+        with self._tx() as con:
+            row = self._paste_row(con, paste_id)
+            if row["state"] in ("recorded", "discarded"):
+                raise InventoryError(f"that paste is already {row['state']}")
+            ts = now_iso()
+            con.execute(
+                "UPDATE sale_pastes SET state='parsing', reason='', started_at=?, updated_at=? WHERE id=?",
+                (ts, ts, row["id"]),
+            )
+            self._audit(con, "paste", row["id"], "retry", actor)
+            return self._paste_dict(self._paste_row(con, row["id"]))
+
+    def discard_paste(self, paste_id: str, *, actor: str = "") -> dict:
+        with self._tx() as con:
+            row = self._paste_row(con, paste_id)
+            if row["state"] == "recorded":
+                raise InventoryError("those sales are recorded; un-sell an item from its drawer instead")
+            ts = now_iso()
+            con.execute(
+                "UPDATE sale_pastes SET state='discarded', finished_at=?, updated_at=? WHERE id=?", (ts, ts, row["id"])
+            )
+            self._audit(con, "paste", row["id"], "discard", actor)
+            return self._paste_dict(self._paste_row(con, row["id"]))
+
+    def fail_paste(self, paste_id: str, reason: str, *, actor: str = "agent") -> dict:
+        why = _clean(reason, 300) or "Couldn't read that order."
+        with self._tx() as con:
+            row = self._paste_row(con, paste_id)
+            if row["state"] not in ("parsing", "failed"):
+                raise InventoryError(f"that paste isn't waiting to be read (it is {row['state']})")
+            ts = now_iso()
+            con.execute(
+                "UPDATE sale_pastes SET state='failed', reason=?, finished_at=?, updated_at=? WHERE id=?",
+                (why, ts, ts, row["id"]),
+            )
+            self._audit(con, "paste", row["id"], "fail", actor, {"reason": why})
+            return self._paste_dict(self._paste_row(con, row["id"]))
+
+    def sale_candidates(self, query: str, *, limit: int = 8, include: str = "") -> list[dict]:
+        """Unsold items that best match a free-text description of what sold ("human dice",
+        "Big Mek Shokk Attack Gun 99120103031"), best first. Scores words shared with the name,
+        id, category, system and notes, plus a fuzzy match on the name. ``include`` (an item id)
+        is always returned first when it exists — the item the operator opened."""
+        import difflib
+
+        words = [w for w in re.findall(r"[a-z0-9]+", str(query or "").lower()) if len(w) > 1]
+        with self._read() as con:
+            rows = con.execute(
+                "SELECT * FROM items WHERE status IN ('planned','available','listed','pending')"
+            ).fetchall()
+            scored = []
+            q = " ".join(words)
+            for r in rows:
+                hay = " ".join(str(r[k] or "") for k in ("name", "id", "category", "system", "notes")).lower()
+                toks = set(re.findall(r"[a-z0-9]+", hay))
+                hits = sum(1 for w in words if w in toks or (len(w) > 3 and any(t.startswith(w) for t in toks)))
+                ratio = difflib.SequenceMatcher(None, q, str(r["name"] or "").lower()).ratio() if q else 0.0
+                score = hits / max(len(words), 1) + 0.5 * ratio + (5 if include and r["id"] == include else 0)
+                if score > 0.15 or (include and r["id"] == include):
+                    scored.append((score, r))
+            scored.sort(key=lambda x: (-x[0], x[1]["name"]))
+            out = []
+            for score, r in scored[: max(1, min(int(limit or 8), 25))]:
+                live = con.execute(
+                    "SELECT channel, url FROM listings WHERE item_id=? AND state='active' ORDER BY id DESC LIMIT 1",
+                    (r["id"],),
+                ).fetchone()
+                lot = (
+                    con.execute("SELECT name FROM lots WHERE id=?", (r["lot_id"],)).fetchone() if r["lot_id"] else None
+                )
+                out.append(
+                    {
+                        "item_id": r["id"],
+                        "name": r["name"],
+                        "condition": r["condition"],
+                        "system": r["system"],
+                        "category": r["category"],
+                        "bin_id": r["bin_id"],
+                        "status": r["status"],
+                        "quantity": r["quantity"],
+                        "target": dollars(r["target_cents"]),
+                        "lot": lot["name"] if lot else "",
+                        "live_listing": {"channel": live["channel"], "url": live["url"]} if live else None,
+                        "score": round(score, 3),
+                    }
+                )
+        return out
+
+    @staticmethod
+    def _sale_line(con, raw: dict, n: int, *, text: str = "", check_weekday: bool = True, force: bool = False) -> dict:
+        """One proposed (or operator-edited) sale line, validated against the store."""
+        if not isinstance(raw, dict):
+            raise InventoryError(f"line {n}: expected an object")
+        iid = str(raw.get("item_id") or "").strip()
+        item = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone() if iid else None
+        if item is None:
+            raise InventoryError(
+                f"line {n}: no item {iid!r}; use inventory_sale_candidates to find it, or ask in questions"
+            )
+        if item["status"] in CLOSED and not force:
+            raise InventoryError(f"line {n}: {item['name']} ({iid}) is already {item['status']}")
+        qty = _int_field("quantity", raw.get("quantity") if raw.get("quantity") not in (None, "") else 1)
+        if qty < 1 or qty > max(int(item["quantity"] or 1), 1):
+            raise InventoryError(f"line {n}: quantity {qty} but the item holds {item['quantity'] or 1}")
+        price = money_field("price", raw.get("price"))
+        if price is None or price is _UNSET or price < 0:
+            raise InventoryError(f"line {n}: a sale needs a price")
+        money = {}
+        for k in ("shipping_charged", "fees", "shipping_cost"):
+            v = money_field(k, raw.get(k))
+            v = 0 if v in (None, _UNSET) else v
+            if v < 0:
+                raise InventoryError(f"line {n}: {k.replace('_', ' ')} can't be negative")
+            money[k] = v
+        channel = _clean(raw.get("channel"), 80)
+        if not channel:
+            raise InventoryError(f"line {n}: where did it sell? (eBay, Facebook, Personal connection …)")
+        sold_on = str(raw.get("sold_on") or "").strip() or today_iso()
+        if not _ISO_DATE_RE.match(sold_on):
+            raise InventoryError(f"line {n}: sold_on must be YYYY-MM-DD, got {sold_on!r}")
+        try:
+            day = datetime.strptime(sold_on, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise InventoryError(f"line {n}: {sold_on!r} isn't a real date") from exc
+        if day > (datetime.now(UTC) + timedelta(days=1)).date():
+            raise InventoryError(
+                f"line {n}: {sold_on} is in the future; check the year (a paste without one is usually this year "
+                "or last)"
+            )
+        if check_weekday:
+            clash = weekday_conflict(text, sold_on)
+            if clash:
+                raise InventoryError(f"line {n}: {clash}")
+        net = price + money["shipping_charged"] - money["fees"] - money["shipping_cost"]
+        return {
+            "item_id": iid,
+            "item_name": item["name"],
+            "bin_id": item["bin_id"],
+            "quantity": qty,
+            "price": dollars(price),
+            "shipping_charged": dollars(money["shipping_charged"]),
+            "fees": dollars(money["fees"]),
+            "fees_estimated": as_flag(raw.get("fees_estimated")),
+            "shipping_cost": dollars(money["shipping_cost"]),
+            "net": dollars(net),
+            "channel": channel,
+            "sold_on": sold_on,
+            "buyer_ref": _clean(raw.get("buyer_ref"), 80),
+            "order_ref": _clean(raw.get("order_ref"), 80),
+            "notes": _clean(raw.get("notes"), 300),
+            "recorded_sale_id": raw.get("recorded_sale_id") if isinstance(raw.get("recorded_sale_id"), int) else None,
+        }
+
+    def propose_paste(
+        self,
+        paste_id: str,
+        lines: list,
+        *,
+        confidence=0.0,
+        questions: list | None = None,
+        notes: str = "",
+        total=None,
+        actor: str = "agent",
+        timeout_minutes: int = PASTE_TIMEOUT_MINUTES,
+    ) -> dict:
+        """The agent's reading of a pasted order: one line per item that sold. ``total`` (the
+        price the paste states for everything together, before shipping) is optional; when given,
+        the line prices must add up to it — a bundle split must not invent or lose money."""
+        if not isinstance(lines, list) or not lines:
+            raise InventoryError("propose at least one line, or call inventory_sale_fail")
+        if len(lines) > MAX_PASTE_LINES:
+            raise InventoryError(f"at most {MAX_PASTE_LINES} lines per paste")
+        try:
+            conf = float(confidence if confidence is not None else 0)
+        except (TypeError, ValueError) as exc:
+            raise InventoryError("confidence must be a number from 0 to 1") from exc
+        with self._tx() as con:
+            row = self._paste_row(con, paste_id)
+            st = self._paste_dict(row, timeout_minutes)["state"]
+            if row["state"] != "parsing" and st != "failed":
+                raise InventoryError(f"that paste isn't waiting to be read (it is {row['state']})")
+            clean = [self._sale_line(con, raw, i + 1, text=row["text"]) for i, raw in enumerate(lines)]
+            ids = [ln["item_id"] for ln in clean]
+            if len(set(ids)) != len(ids):
+                raise InventoryError("the same item is on two lines; put the quantity on one line")
+            if total not in (None, ""):
+                want = money_field("total", total)
+                got = sum(to_cents(ln["price"]) or 0 for ln in clean)
+                if want not in (None, _UNSET) and abs(got - want) > len(clean):
+                    raise InventoryError(
+                        f"the line prices add up to {dollars(got)} but the paste's total is {dollars(want)}; "
+                        "split the total so it adds up exactly"
+                    )
+            proposal = {
+                "lines": clean,
+                "confidence": min(1.0, max(0.0, conf)),
+                "questions": [_clean(q, 300) for q in (questions or []) if _clean(q, 300)][:5],
+                "notes": _clean(notes, 500),
+                "total": dollars(money_field("total", total)) if total not in (None, "") else None,
+            }
+            ts = now_iso()
+            con.execute(
+                "UPDATE sale_pastes SET state='proposed', proposal=?, reason='', finished_at=?, updated_at=? WHERE id=?",
+                (json.dumps(proposal), ts, ts, row["id"]),
+            )
+            self._audit(
+                con, "paste", row["id"], "propose", actor, {"lines": len(clean), "confidence": proposal["confidence"]}
+            )
+            return self._paste_dict(self._paste_row(con, row["id"]), timeout_minutes)
+
+    def record_paste(self, paste_id: str, lines: list | None = None, *, force: bool = False, actor: str = "") -> dict:
+        """Record the (operator-checked) lines as sales: one ``mark_sold`` per line — each its own
+        audited transaction — then the paste is ``recorded``. ``lines`` defaults to the proposal.
+        If a line fails part-way, the ones already recorded stay recorded (and are skipped on the
+        next try) and the error names the line."""
+        with self._read() as con:
+            row = self._paste_row(con, paste_id)
+            if row["state"] != "proposed":
+                raise InventoryError(f"that paste isn't ready to record (it is {row['state']})")
+            proposal = _loads(row["proposal"], {}) or {}
+            raw_lines = lines if lines is not None else proposal.get("lines") or []
+            if not isinstance(raw_lines, list) or not raw_lines:
+                raise InventoryError("nothing to record")
+            # The operator has read these lines; a weekday clash was the agent's to catch.
+            checked = [
+                self._sale_line(
+                    con,
+                    raw,
+                    i + 1,
+                    text=row["text"],
+                    check_weekday=False,
+                    force=force or bool(raw.get("recorded_sale_id")),
+                )
+                for i, raw in enumerate(raw_lines)
+            ]
+        ids = [ln["item_id"] for ln in checked]
+        if len(set(ids)) != len(ids):
+            raise InventoryError("the same item is on two lines; put the quantity on one line")
+        sales = []
+        for i, ln in enumerate(checked):
+            if ln["recorded_sale_id"]:
+                continue
+            extra = ["From a pasted order"]
+            if ln["order_ref"]:
+                extra.append("order " + ln["order_ref"])
+            if ln["fees_estimated"]:
+                extra.append("fees estimated")
+            note = "; ".join(extra) + "." + (" " + ln["notes"] if ln["notes"] else "")
+            try:
+                sale = self.mark_sold(
+                    ln["item_id"],
+                    price=ln["price"],
+                    channel=ln["channel"],
+                    sold_on=ln["sold_on"],
+                    fees=ln["fees"],
+                    shipping_charged=ln["shipping_charged"],
+                    shipping_cost=ln["shipping_cost"],
+                    quantity=ln["quantity"],
+                    notes=note,
+                    actor=actor,
+                    force=force,
+                )
+            except InventoryError as exc:
+                self._save_paste_progress(row["id"], checked, sales, actor, final=False)
+                done = f" ({len(sales)} already recorded)" if sales else ""
+                raise InventoryError(f"line {i + 1}, {ln['item_name']}: {exc}{done}") from exc
+            ln["recorded_sale_id"] = sale["id"]
+            sales.append(sale)
+        out = self._save_paste_progress(row["id"], checked, sales, actor, final=True)
+        out["sales"] = sales
+        return out
+
+    def _save_paste_progress(self, pid: str, lines: list, sales: list, actor: str, *, final: bool) -> dict:
+        with self._tx() as con:
+            row = self._paste_row(con, pid)
+            proposal = _loads(row["proposal"], {}) or {}
+            proposal["lines"] = lines
+            ids = _loads(row["sale_ids"], []) + [s["id"] for s in sales]
+            ts = now_iso()
+            con.execute(
+                "UPDATE sale_pastes SET state=?, proposal=?, sale_ids=?, finished_at=?, updated_at=? WHERE id=?",
+                ("recorded" if final else "proposed", json.dumps(proposal), json.dumps(ids), ts, ts, pid),
+            )
+            if final:
+                self._audit(con, "paste", pid, "record", actor, {"sales": ids})
+            return self._paste_dict(self._paste_row(con, pid))
 
 
 def _days_ago(days: int) -> str:
