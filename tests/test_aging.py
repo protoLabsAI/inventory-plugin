@@ -4,7 +4,7 @@ Settings; a snooze is recorded and hides the item until it ends."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, datetime, timedelta
 
 import inventory_plugin
 import pytest
@@ -18,7 +18,9 @@ from tests.test_view import _run_page
 
 
 def _ago(n: int) -> str:
-    return (date.today() - timedelta(days=n)).isoformat()
+    # The store counts days in UTC (today_iso); a local date.today() is a day off every evening
+    # west of Greenwich, which made these tests fail after ~4 pm Pacific.
+    return (datetime.now(UTC).date() - timedelta(days=n)).isoformat()
 
 
 def _item(store, iid, *, status="available", target=40):
@@ -88,9 +90,9 @@ def test_snooze_hides_an_item_until_it_ends_and_is_audited(store):
     _item(store, "A")
     store.add_listing("A", channel="eBay", listed_on=_ago(60), actor="t")
     out = store.snooze_aging("A", days=14, actor="op")
-    assert out["snoozed_until"] == (date.today() + timedelta(days=14)).isoformat()
+    assert out["snoozed_until"] == (datetime.now(UTC).date() + timedelta(days=14)).isoformat()
     assert store.aging((45, 90, 120))["items"] == []
-    later = (date.today() + timedelta(days=15)).isoformat()
+    later = (datetime.now(UTC).date() + timedelta(days=15)).isoformat()
     assert [r["item_id"] for r in store.aging((45, 90, 120), today=later)["items"]] == ["A"]
     log = store.audit_log(entity_id="A")
     assert any("aging_snoozed_until" in str(a["changes"]) and a["actor"] == "op" for a in log)

@@ -130,7 +130,9 @@ def test_the_check_reuses_the_live_camera_and_has_the_photo_fallback():
     assert 'data-act="pa-cam"' in paint and 'capBtn("bc"' in paint and 'id="pa-cam-slot"' in paint
     assert "STRAY_TEXT[c.kind](c)" in paint and "Not scanned yet" in paint and "Unknown label" in paint
     start = PAGE[PAGE.index("  async function camStart() {") : PAGE.index("  function camTick(now) {")]
-    assert 'CAM.ctx = state.drawer && state.drawer.kind === "bincheck"' in start
+    assert (
+        'dk === "bincheck"' in start and 'CAM.ctx = dk === "bincheck" || dk === "scanlabel" ? dk : "putaway"' in start
+    )
     assert "state.drawer.kind !== CAM.ctx" in start  # the drawer that started it owns it
     hit = PAGE[PAGE.index("  async function camHit(text) {") : PAGE.index("  async function camTorch() {")]
     assert 'if (CAM.ctx === "bincheck")' in hit and "location" not in hit

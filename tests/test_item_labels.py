@@ -54,7 +54,8 @@ def test_item_hop_redirects_to_the_console_link_and_keeps_the_ids_case(host, reg
 
     host(view_url=view_url)
     r = _client(registry).get("/plugins/inventory/i/NH-SH-Harrows", follow_redirects=False)
-    assert r.status_code == 302 and r.headers["location"].endswith("vp=item%3DNH-SH-Harrows")
+    # 0.16.0: a landing page, not a bare 302 (a Camera-app scan opens Safari, which isn't signed in)
+    assert r.status_code == 200 and "vp=item%3DNH-SH-Harrows" in r.text and "NH-SH-Harrows" in r.text
     assert r.headers["cache-control"] == "no-store"
     assert calls == [("inventory", None, {"item": "NH-SH-Harrows"})]  # item ids are case-sensitive
 
