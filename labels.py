@@ -13,6 +13,7 @@ Host-only imports stay lazy so the suite runs with no protoAgent present.
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 from urllib.parse import quote, urlsplit
@@ -215,6 +216,61 @@ def sheet_html(bins: list[dict], base: str) -> str:
         f"<span>{count} label{'s' if count != 1 else ''} on {pages} sheet{'s' if pages != 1 else ''} of US Letter. "
         f"Each opens its bin at {_E(base)}{_E(LABEL_PATH)}&lt;bin&gt;</span></div>"
         f'<div class="sheet">{"".join(cells)}</div></body></html>'
+    )
+
+
+# The console's own credential keys (protoAgent apps/web/src/lib/credentials.ts): a paired
+# device's token, else the operator token. The hop is served from the SAME origin as the hub's
+# console, so the landing page can see whether this browser is signed in without sending anything.
+CONSOLE_TOKEN_KEYS = ("protoagent.deviceToken", "protoagent.authToken")
+
+LANDING_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}
+
+
+def _script_json(value: str) -> str:
+    """A string as a JS literal that is safe inside a <script> element."""
+    out = json.dumps(value)
+    for a, b in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
+        out = out.replace(a, b)
+    return out
+
+
+def landing_page(kind: str, label_id: str, target: str) -> str:
+    """What a scanned label opens (0.16.0), in place of a bare redirect.
+
+    On an iPhone the Camera app always opens a scanned link in Safari: iOS never hands a link to
+    a home-screen web app, and the two keep separate storage, so Safari usually isn't signed in.
+    A browser that IS signed in to this console (the token sits in this origin's localStorage)
+    goes straight on to the item or bin. Anyone else gets the id and how to open it in the app
+    instead of a sign-in screen. The page reads no data: it says the same for an id that exists
+    and one that doesn't, and the token never leaves the browser."""
+    what = "bin" if kind == "bin" else "item"
+    keys = ",".join(_script_json(k) for k in CONSOLE_TOKEN_KEYS)
+    go = (
+        "<script>(function(){try{var k=[" + keys + "];for(var i=0;i<k.length;i++){if(localStorage.getItem(k[i])){"
+        "document.documentElement.className='go';location.replace("
+        + _script_json(target)
+        + ");return}}}catch(e){}})();</script>"
+    )
+    id_cls = "id" if kind == "bin" else "id long"
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer">'
+        '<meta name="robots" content="noindex"><title>' + what.capitalize() + " " + _E(label_id) + "</title>"
+        "<style>:root{color-scheme:light dark}.go body{visibility:hidden}"
+        "body{font-family:-apple-system,Helvetica,Arial,sans-serif;margin:2rem auto;padding:0 1.25rem;max-width:34rem;line-height:1.5}"
+        ".id{font-family:ui-monospace,Menlo,monospace;font-size:3rem;font-weight:700;margin:0}"
+        ".id.long{font-size:1.6rem;word-break:break-all}.k{font-size:.85rem;text-transform:uppercase;letter-spacing:.06em;opacity:.7;margin:0}"
+        "ol{padding-left:1.25rem}a.btn{display:inline-block;margin-top:.5rem;padding:.6rem 1rem;border:1px solid currentColor;border-radius:.5rem;text-decoration:none;color:inherit}"
+        "</style>" + go + "</head><body>"
+        '<p class="k">' + what.capitalize() + " label</p>"
+        f'<p class="{id_cls}">{_E(label_id)}</p>'
+        "<p>Scanned labels open in Safari, not the protoAgent app, and Safari isn't signed in. To open this "
+        + what
+        + " in the app:</p><ol><li>Open protoAgent from your Home Screen.</li><li>Go to Inventory and tap <b>Scan label</b>.</li>"
+        "<li>Point the camera at this label.</li></ol>"
+        f'<p><a class="btn" href="{_E(target, quote=True)}">Sign in here instead</a></p>'
+        "</body></html>"
     )
 
 

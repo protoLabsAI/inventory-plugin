@@ -14,7 +14,9 @@ from pathlib import Path
 from .labels import (
     ITEM_PREFIX,
     LABEL_PREFIX,
+    LANDING_HEADERS,
     console_root,
+    landing_page,
     norm_bin_id,
     norm_item_id,
     older_host_item_page,
@@ -143,7 +145,8 @@ PAGE = r"""<!doctype html>
   <div class="pl-panel-header pl-panel-header--compact">
     <h1 class="pl-panel-header__title">Inventory</h1>
     <div class="pl-panel-header__actions anchor">
-      <button class="pl-btn pl-btn--sm pl-btn--primary scan-top" data-act="scan">Scan</button>
+      <button class="pl-btn pl-btn--sm scan-top" data-act="scanlabel">Scan label</button>
+      <button class="pl-btn pl-btn--sm pl-btn--primary scan-top" data-act="scan">Scan a box</button>
       <button class="pl-btn pl-btn--sm pl-btn--ghost" id="more" aria-haspopup="menu" aria-expanded="false">More</button>
       <div class="pop" id="more-menu" hidden></div>
     </div>
@@ -156,7 +159,7 @@ PAGE = r"""<!doctype html>
   </div></div>
   <div id="err" class="pl-callout pl-callout--error" role="alert" hidden></div>
   <main class="main" id="main" role="tabpanel"></main>
-  <div class="scanbar"><button class="pl-btn pl-btn--primary block" data-act="scan">Scan</button></div>
+  <div class="scanbar"><div class="frow"><button class="pl-btn block" data-act="scanlabel">Scan label</button><button class="pl-btn pl-btn--primary block" data-act="scan">Scan a box</button></div></div>
 </div>
 <div id="overlay-root"></div>
 <div id="dialog-root"></div>
@@ -804,7 +807,7 @@ PAGE = r"""<!doctype html>
     if (unweighed) chores.push('<li><button class="irow" data-see="noweight"><span class="irow-main">' + unweighed + " for-sale item" + (unweighed === 1 ? " has" : "s have") + ' no packed weight</span><span class="muted">Weigh them</span></button></li>');
     if (stale) chores.push('<li class="chore"><button class="irow" data-see="stale"><span class="irow-main">' + stale + " price" + (stale === 1 ? " is" : "s are") + " over " + STALE_DAYS + ' days old</span><span class="muted">See them</span></button>' + (composeTarget() ? '<button class="pl-btn pl-btn--sm" data-act="ask-reprice">Ask for a re-price</button>' : "") + "</li>");
     if (chores.length) h += '<section class="sec"><div class="sec-head"><h2 class="sec-title">Housekeeping</h2></div><ul class="list">' + chores.join("") + "</ul></section>";
-    return h.indexOf('class="sec"') >= 0 ? h : h + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan</button></div></div>';
+    return h.indexOf('class="sec"') >= 0 ? h : h + '<div class="pl-empty pl-empty--slotted"><div class="pl-empty__title">Nothing waiting</div><div class="pl-empty__desc">Scan a box to start.</div><div class="pl-empty__actions"><button class="pl-btn pl-btn--primary" data-act="scan">Scan a box</button></div></div>';
   }
   function chipsHtml() {
     const f = state.f, chips = [];
@@ -1888,10 +1891,11 @@ PAGE = r"""<!doctype html>
     if (CAM.video && CAM.video.paused && CAM.on) CAM.video.play().catch(() => {});
   }
   // The viewfinder serves two drawers: Put away, and a bin check (0.15.0). Whichever is open owns it.
-  const camRepaint = () => (CAM.ctx === "bincheck" ? bcPaint() : paPaint());
+  const camRepaint = () => (CAM.ctx === "bincheck" ? bcPaint() : CAM.ctx === "scanlabel" ? slPaint() : paPaint());
   async function camStart() {
     if (CAM.on) return;
-    CAM.ctx = state.drawer && state.drawer.kind === "bincheck" ? "bincheck" : "putaway";
+    const dk = state.drawer && state.drawer.kind;
+    CAM.ctx = dk === "bincheck" || dk === "scanlabel" ? dk : "putaway";
     CAM.error = ""; CAM.idled = false;
     try {  // the AudioContext must be made inside this tap, or iOS keeps it muted
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -1918,7 +1922,7 @@ PAGE = r"""<!doctype html>
     CAM.raf = requestAnimationFrame(camTick);
     clearInterval(CAM.idle);
     CAM.idle = setInterval(() => { if (CAM.on && !CAM.paused && Date.now() - CAM.lastHit > CAM_IDLE_MS) { camStop(); CAM.idled = true; camRepaint(); } }, 5000);
-    (CAM.ctx === "bincheck" ? bcSay : paSay)("Camera on. Point it at a label.");
+    (CAM.ctx === "bincheck" ? bcSay : CAM.ctx === "scanlabel" ? slSay : paSay)("Camera on. Point it at a label.");
   }
   function camStop() {
     cancelAnimationFrame(CAM.raf); CAM.raf = 0; clearInterval(CAM.idle); CAM.idle = 0;
@@ -1944,6 +1948,7 @@ PAGE = r"""<!doctype html>
     if (!camFresh(CAM.seen, text, now)) return;
     CAM.lastHit = now;
     if (CAM.ctx === "bincheck") { if (bcApply(parseLabel(text), text)) { camBeep(); camFlash(); } return; }
+    if (CAM.ctx === "scanlabel") { if (slApply(parseLabel(text))) camBeep(); return; }
     const lab = parseLabel(text);
     if (!lab) { PA.note = "That QR code isn't an Inventory label."; return paPaint(); }
     if (lab.kind === "item") {
@@ -2055,6 +2060,65 @@ PAGE = r"""<!doctype html>
     "pa-cam": () => camStart(),
     "pa-camstop": () => { camStop(); CAM.idled = false; camRepaint(); },
     "pa-torch": () => camTorch(),
+  };
+
+  // ── scan a label from inside the app (0.16.0) ────────────────────────────────────────
+  // On an iPhone a label read by the Camera app opens in Safari, never the home-screen web app
+  // (iOS has no link capturing for web apps, and the two keep separate storage, so Safari isn't
+  // signed in). So the app scans its own labels: an item's label opens the item, a bin's the bin.
+  // Same viewfinder, photo and typed-id fallbacks as Put away; a decoded URL is parsed, never opened.
+  const SL = { note: "", busy: false };
+  function openScanLabel() {
+    ++drawerSeq; state.drawer = { kind: "scanlabel" }; SL.note = ""; SL.busy = false;
+    slPaint();
+    if (camSupported() && !CAM.unavailable) camStart();  // still inside the tap: iOS allows the stream + beep
+  }
+  const slSay = (t) => { const l = $("#sl-live"); if (l) l.textContent = t; };
+  function slPaint() {
+    if (!state.drawer || state.drawer.kind !== "scanlabel") return;
+    const live = camSupported() && !CAM.unavailable;
+    const camUi = CAM.on
+      ? '<div id="pa-cam-slot" class="gap-t"></div><div class="drow cam-acts"><span class="muted" aria-hidden="true">An item\'s label opens the item; a bin\'s opens the bin.</span>' +
+        (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
+        '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
+      : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
+    const body = '<p class="muted">Point the camera at an item\'s or a bin\'s label.</p>' + camUi +
+      (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
+      (SL.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
+      (SL.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(SL.note) + "</div></div>" : "") +
+      '<div class="form one gap-t">' + field("sl_id", "Or type an item or bin id", "", { placeholder: "B03 or an item id", hint: "For a label that won't read." }) + '</div><div class="drow"><button class="pl-btn" data-act="sl-type">Open</button></div>' +
+      '<div class="sr-only" id="sl-live" aria-live="polite"></div>';
+    const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
+    const foot = camBtn + capBtn("sl", "Take a photo of a label", !live) + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
+    paintDrawer("Scan label", '<div id="scanlabel">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
+    if (CAM.on) camMount();
+  }
+  // True when the label opened something (the caller beeps); false leaves a note and keeps scanning.
+  function slApply(lab) {
+    if (!lab) { SL.note = "That QR code isn't an Inventory label."; slPaint(); return false; }
+    if (lab.kind === "item") {
+      const it = itemById(lab.id) || state.items.find((i) => i.id.toLowerCase() === String(lab.id).toLowerCase());
+      if (!it) { SL.note = "There's no item " + lab.id + " here. It may have been deleted, or the label belongs to another agent."; slPaint(); return false; }
+      closeDrawer(); if (state.tab !== "stock") go("stock"); openItem(it.id); return true;
+    }
+    if (lab.kind === "bin") {
+      if (!binById(lab.id)) { SL.note = "There's no bin " + lab.id + " here. It may have been deleted, or the label belongs to another agent."; slPaint(); return false; }
+      closeDrawer(); if (state.tab !== "bins") go("bins"); openBin(lab.id); return true;
+    }
+    SL.note = "No item or bin " + lab.id + " here."; slPaint(); return false;
+  }
+  async function slScan(file) {
+    if (!file || SL.busy) return;
+    SL.busy = true; SL.note = ""; slPaint();
+    let text = "";
+    try { text = await decodePhoto(file); } catch (e) { SL.busy = false; SL.note = e.message || String(e); return slPaint(); }
+    SL.busy = false;
+    if (!text) { SL.note = "Couldn't read a label. Retake it closer, flat and in good light, or type the id below."; return slPaint(); }
+    slApply(parseLabel(text));
+  }
+  const SL_ACTS = {
+    scanlabel: () => openScanLabel(),
+    "sl-type": () => { const el = $("#f_sl_id"); const lab = parseTyped(el ? el.value : ""); if (!lab) return toast("Type an item id or a bin id", "warning"); slApply(lab); },
   };
 
   // ── check a bin (0.15.0): scan every label in it, see what's there, missing or astray ──────
@@ -2198,7 +2262,7 @@ PAGE = r"""<!doctype html>
     bundle: () => { const xs = state.aging.filter((a) => state.agingSel.has(a.item_id)); if (xs.length < 2) return; composeToChat(bundleText(xs)); },
     draft: (id) => requestDraft(id), redraft: (id) => requestDraft(id), dlive: (id) => liveDialog(id), dphotos: (id) => downloadPhotos(id), draftbulk: () => bulkDraft(),
   };
-  Object.assign(ACTS, SCAN_ACTS, PA_ACTS, BC_ACTS);
+  Object.assign(ACTS, SCAN_ACTS, PA_ACTS, BC_ACTS, SL_ACTS);
   function seeAll(what) {
     if (what === "split") Object.assign(state.f, { seg: "split", preset: "" });
     else if (what === "nobin") Object.assign(state.f, { preset: "nobin", bin: "" });
@@ -2241,7 +2305,7 @@ PAGE = r"""<!doctype html>
       if (t.id === "f-system") { state.f.system = t.value; return renderResults(); }
       if (t.id === "f-lot") { state.f.lot = t.value; return renderResults(); }
       if (t.id === "f-bin") { state.f.bin = t.value; return renderResults(); }
-      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "bc" ? bcScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
+      if (t.dataset.cap) { const f = t.files && t.files[0]; t.value = ""; return t.dataset.cap === "pa" ? paScan(f) : t.dataset.cap === "bc" ? bcScan(f) : t.dataset.cap === "sl" ? slScan(f) : t.dataset.cap === "sc-piece" ? addPiece(f) : scanPhoto(f); }
       if (t.name === "sc-kind") { SC.kind = t.value; return scPaint(); }
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
     });
@@ -2326,14 +2390,14 @@ def build_view_router(cfg: dict):
     # host learns how, with nothing cached in between.
     @r.get(LABEL_PREFIX + "/{bin_id}", include_in_schema=False)
     async def _label(bin_id: str):
-        from fastapi.responses import PlainTextResponse, RedirectResponse
+        from fastapi.responses import PlainTextResponse
 
         bid = norm_bin_id(bin_id)
         if bid is None:
             return PlainTextResponse("Not a bin label.", status_code=404, headers={"Cache-Control": "no-store"})
         target = view_target(bid)
         if target:
-            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+            return HTMLResponse(landing_page("bin", bid, target), headers=LANDING_HEADERS)
         return HTMLResponse(older_host_page(bid, console_root()), headers={"Cache-Control": "no-store"})
 
     # The address printed on an ITEM label (0.10.0): same contract as the bin hop. It takes only
@@ -2341,14 +2405,14 @@ def build_view_router(cfg: dict):
     # echoes only that id.
     @r.get(ITEM_PREFIX + "/{item_id}", include_in_schema=False)
     async def _item_label(item_id: str):
-        from fastapi.responses import PlainTextResponse, RedirectResponse
+        from fastapi.responses import PlainTextResponse
 
         iid = norm_item_id(item_id)
         if iid is None:
             return PlainTextResponse("Not an item label.", status_code=404, headers={"Cache-Control": "no-store"})
         target = view_target(item_id=iid)
         if target:
-            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+            return HTMLResponse(landing_page("item", iid, target), headers=LANDING_HEADERS)
         return HTMLResponse(older_host_item_page(iid, console_root()), headers={"Cache-Control": "no-store"})
 
     # A printable label sheet (0.10.1), by the short-lived token the gated /labels/sheet minted.

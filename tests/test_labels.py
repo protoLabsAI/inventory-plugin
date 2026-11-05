@@ -102,7 +102,8 @@ def test_hop_redirects_to_the_console_link_when_the_host_can_make_one(host, regi
     host(view_url=view_url, console_url=lambda: "http://127.0.0.1:7881")
     c = _client(registry)
     r = c.get("/plugins/inventory/b/b07", follow_redirects=False)
-    assert r.status_code == 302 and r.headers["location"].endswith("vp=bin%3DB07")
+    # 0.16.0: a landing page, not a bare 302 (a Camera-app scan opens Safari, which isn't signed in)
+    assert r.status_code == 200 and "vp=bin%3DB07" in r.text and ">B07<" in r.text
     assert r.headers["cache-control"] == "no-store"
     assert calls == [("inventory", None, {"bin": "B07"})]  # upper-cased like the store keeps it
 
