@@ -33,9 +33,14 @@ PAGE = r"""<!doctype html>
 <title>Inventory</title>
 <style>
   html,body{margin:0;background:var(--pl-color-bg);color:var(--pl-color-fg);font-family:var(--pl-font-sans);font-size:var(--pl-font-size-sm)}
+  /* One scroll area: .main. The page itself never scrolls, or a list that hits its end hands the
+     wheel to the outer page (two scrollbars in the console). */
+  html,body{height:100%;overflow:hidden}
   .view{display:flex;flex-direction:column;height:100vh;height:100dvh}
   .view-tabs{padding:0 var(--pl-space-4)}
-  .main{flex:1;overflow:auto;padding:var(--pl-space-3) var(--pl-space-4) var(--pl-space-8)}
+  /* position:relative keeps the kit's absolutely positioned checkbox inputs and .sr-only labels inside
+     this scroller; without it they sat against the page and stretched it to the list's full height. */
+  .main{flex:1;overflow:auto;padding:var(--pl-space-3) var(--pl-space-4) var(--pl-space-8);position:relative;overscroll-behavior:contain}
   .sec{margin-bottom:var(--pl-space-6)}
   .sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--pl-space-2);margin-bottom:var(--pl-space-1_5)}
   .row-acts{display:flex;gap:var(--pl-space-2)}
@@ -2273,11 +2278,20 @@ PAGE = r"""<!doctype html>
     const pop = $(id), btn = $(btnId); if (!pop || !btn) return;
     pop.hidden = !open; btn.setAttribute("aria-expanded", String(open));
   }
+  // The kit's .pl-menu__item is styled for Radix's div items: it highlights through data-highlighted,
+  // which Radix sets and we must set ourselves, and a <button> would keep the browser's own chrome.
+  function menuItems() { return [...document.querySelectorAll("#more-menu .pl-menu__item")]; }
+  function menuFocus(i) {
+    const items = menuItems(); if (!items.length) return;
+    const k = (i + items.length) % items.length;
+    items.forEach((el, j) => { if (j === k) el.setAttribute("data-highlighted", ""); else el.removeAttribute("data-highlighted"); });
+    items[k].focus();
+  }
   function wire() {
     document.addEventListener("click", (e) => {
       if (!e.target.closest("#more,#more-menu")) setPop("#more-menu", "#more", false);
       if (!e.target.closest("#filter-btn,#filter-pop")) setPop("#filter-pop", "#filter-btn", false);
-      if (e.target.closest("#more")) { const m = $("#more-menu"); m.innerHTML = '<div class="pl-menu" role="menu">' + MENU.map(([l], i) => '<button class="pl-menu__item" role="menuitem" data-menu="' + i + '">' + esc(l) + "</button>").join("") + "</div>"; return setPop("#more-menu", "#more", m.hidden); }
+      if (e.target.closest("#more")) { const m = $("#more-menu"); m.innerHTML = '<div class="pl-menu" role="menu">' + MENU.map(([l], i) => '<div class="pl-menu__item" role="menuitem" tabindex="-1" data-menu="' + i + '"><span class="pl-menu__label">' + esc(l) + "</span></div>").join("") + "</div>"; const open = m.hidden; setPop("#more-menu", "#more", open); if (open) menuFocus(0); return; }
       if (e.target.closest("#filter-btn")) return setPop("#filter-pop", "#filter-btn", $("#filter-pop").hidden);
       if (e.target.closest("#copy-md")) return copySelected();
       if (e.target.closest("#sel-clear")) { state.selected.clear(); return renderResults(); }
@@ -2310,7 +2324,19 @@ PAGE = r"""<!doctype html>
       if (t.name === "sc-alt" || t.name === "alt") { t.closest(".pl-radiocard-group").querySelectorAll(".pl-radiocard").forEach((c) => c.classList.toggle("pl-radiocard--selected", c.contains(t))); return; }
     });
     document.addEventListener("input", (e) => { if (e.target.id === "f-q") { state.f.q = e.target.value; renderResults(); } if (e.target.closest && e.target.closest("#paste-lines")) pasteNets(); });
+    document.addEventListener("mouseover", (e) => { const it = e.target.closest && e.target.closest("#more-menu .pl-menu__item"); if (it) menuFocus(menuItems().indexOf(it)); });
     document.addEventListener("keydown", (e) => {
+      const menuOpen = !$("#more-menu").hidden;
+      if (menuOpen && e.target.closest && e.target.closest("#more-menu")) {
+        const items = menuItems(), i = items.indexOf(document.activeElement);
+        if (e.key === "ArrowDown") { e.preventDefault(); return menuFocus(i + 1); }
+        if (e.key === "ArrowUp") { e.preventDefault(); return menuFocus(i - 1); }
+        if (e.key === "Home") { e.preventDefault(); return menuFocus(0); }
+        if (e.key === "End") { e.preventDefault(); return menuFocus(items.length - 1); }
+        if ((e.key === "Enter" || e.key === " ") && i >= 0) { e.preventDefault(); setPop("#more-menu", "#more", false); return MENU[+items[i].dataset.menu][1](); }
+        if (e.key === "Escape") { e.preventDefault(); setPop("#more-menu", "#more", false); return $("#more").focus(); }
+        if (e.key === "Tab") setPop("#more-menu", "#more", false);
+      }
       const dialogOpen = !!$("#dialog-root").innerHTML;
       if (e.key === "Escape" && state.drawer && !dialogOpen) return closeDrawer();
       if (e.key === "Tab" && state.drawer && !dialogOpen) {
