@@ -1,5 +1,15 @@
 # Inventory view redesign: audit and spec
 
+> **Status (0.16.2).** Shipped: the Next / Stock / Bins / Lots IA and the item drawer (0.5.0), bins
+> and the pick list (0.6.0), bin labels (0.7.0), scan intake (0.8.0), listing drafts (0.9.0), item
+> labels (0.10.0). **Superseded:** the scan flow's S6 bin picker (§3) was replaced in 0.11.0 by
+> *label first*: the scan ends with Print labels and pieces are binned later with **Put away**, by
+> scanning each piece's label and then the bin's. QR deep links (§4, open question 2) shipped in
+> core as protoAgent #4712 (`sdk.view_url`, 0.227.0). Shipped after this spec: paste a sale and the
+> double-sell guard (0.12.0), a live camera (0.13.0), aging stock and sealed vs split (0.14.0),
+> shipping data, Check a bin and thermal labels (0.15.0), and in-app Scan label (0.16.0). How the
+> view works today is in [usage.md](../usage.md); this page is kept as the design record.
+
 Plugin `inventory` 0.4.2, shown as a merchantAgent rail view. Requested by Josh, 2026-11-02.
 Status: **approved 2026-11-02.** This repo is public, so dollar figures from the real inventory are redacted to `$NN`, and the interactive preview (built on real data) is not committed.
 
