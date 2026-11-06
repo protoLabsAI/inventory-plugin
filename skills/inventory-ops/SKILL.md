@@ -23,10 +23,19 @@ not a note. If a number is not in the inventory, it has not been decided.
   re-price explainable.
 - **Listings** — where an item is up (channel, url, price). `inventory_listing add|end`.
 - **Sales** — what it actually sold for. `inventory_mark_sold` computes
-  `net = price + shipping charged − fees − shipping cost` and closes live listings.
+  `net = price + shipping charged − fees − shipping cost`. A live listing on the SAME channel
+  closes as sold; one on any other channel is flagged `needs_end` (still up on that
+  marketplace) and the result lists it. Tell the operator to end it there — the view shows it
+  under Next → End these listings until they tap **I ended it**.
 - **Bins** — where an item physically is (B01, B02 …). `inventory_bins` lists, creates,
   relabels and deletes empty bins; `inventory_move_to_bin` records a move;
   `inventory_list(bin_id="B03")` shows a bin's contents, `bin_id="-"` the items in no bin.
+  The operator normally bins in the view, **label first**: a scanned box's pieces get QR
+  labels, then **Put away** scans each piece's label and the bin's, which moves them and makes
+  a `planned` piece `available`. Answer "where is X" from `inventory_get` / `inventory_list`;
+  an item flagged missing by Check a bin has `missing_since` set.
+- **Shipping** — packed weight (ounces) and box size per item, entered in the view. Quote
+  them when drafting or answering shipping questions; never guess a weight.
 - **Pick list** — every sale not yet packed, with the bin to pull it from.
   `inventory_packing list`, then `inventory_packing packed` once the operator says it is
   packed (a sold-out item then leaves its bin).
@@ -88,7 +97,11 @@ two web searches to confirm a box's contents. `confidence` is how sure you are o
 product; give up to 3 alternatives when unsure. For a box, list the pieces it splits into,
 with `model_count` 0 for anything you cannot see or confirm. Never pad the list. In a
 **pricing** turn, follow "Re-pricing an item" for each item listed, set no price below 3
-relevant sold comps, and finish with `inventory_scan_pricing_done(scan_id, unpriced)`. Don't
+relevant sold comps, and finish with `inventory_scan_pricing_done(scan_id, unpriced)`. When the
+prompt names the box itself, also price it SEALED the same way and record that with
+`inventory_scan_sealed_price` (never `inventory_set_price` — the sealed box is not an item);
+pass the fees from `ebay_net_proceeds` when you have them so the view can compare net, not
+gross. Don't
 message the operator from either turn; the view shows the result.
 
 ## Listing-draft turns
@@ -102,3 +115,16 @@ on the first line, and only what the record and photos show. No eBay, pricing to
 subagents, and a web search only when the record lacks the basics. The price is the item's
 target and is never part of the draft. Nothing is posted: the operator lists it and records
 the URL. Don't message the operator from the turn.
+
+## Sale-paste turns
+
+**Record a sale** in the view stores the operator's pasted order or note and starts a turn in
+that paste's own session. Read the text, find each item with `inventory_sale_candidates` (search
+by name, part number and product type; it also returns recent SOLD matches), then call
+`inventory_sale_propose(paste_id, lines, confidence, questions)` once, or `inventory_sale_fail`.
+One paste can cover several items: split a bundle price the way the operator said, otherwise say
+how you split it. Use the fee from the text when it's there; an estimate must be marked
+`fees_estimated`. Never stamp a year onto a date like "Mon Dec 23" without checking the weekday —
+ask in `questions` and default to today. If a candidate shows the same item already sold at a
+similar price and date, fail with `already_recorded` instead of proposing a second sale. Nothing
+is recorded until the operator taps Record. No web, eBay or subagents; don't message the operator.

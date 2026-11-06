@@ -1,77 +1,118 @@
-# inventory plugin
+<p align="center">
+  <img src="docs/assets/hero.webp" alt="Inventory in protoAgent: the Stock tab grouped by game system, with an item's drawer open showing its price, the eBay sold comps it rests on, its bin, label and listing draft" width="100%">
+</p>
 
-The resale inventory as a **source of truth** for [protoAgent](https://github.com/protoLabsAI/protoAgent):
-lots, items, listings, sales, price evidence, and an audit trail of every change — in a
-SQLite file the plugin owns. Built for merchantAgent, useful for any agent that sells things.
+<p align="center">
+  <a href="https://github.com/protoLabsAI/inventory-plugin/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/protoLabsAI/inventory-plugin/ci.yml?branch=main&label=CI"></a>
+  <a href="https://github.com/protoLabsAI/inventory-plugin/tags"><img alt="Latest tag" src="https://img.shields.io/github/v/tag/protoLabsAI/inventory-plugin?label=version&sort=semver"></a>
+  <a href="https://github.com/protoLabsAI/protoAgent"><img alt="protoAgent 0.148+" src="https://img.shields.io/badge/protoAgent-%E2%89%A5%200.148-7c5cff"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-22c55e"></a>
+</p>
 
-```
-inventory_summary()
-  BLOODBOWL-2026-09   cost $355.00   remaining (low/target/high) $612 / $790 / $1,010
-                      realized net $0.00   projected net at target +$435.00
-```
+# Inventory
 
-## What it contributes
+The back office for a resale business, built as a [protoAgent](https://github.com/protoLabsAI/protoAgent)
+plugin. It tracks what you bought, what each box split into, where every piece is on the shelf, what it's
+worth, where it's listed and what it actually sold for. Your agent works the inventory with you in chat, and
+the Inventory view in the console lets you do it by hand, on a desktop or on your phone.
 
-| | |
+It was built for tabletop games (sealed boxes broken into units and sold on eBay), but anything you buy in
+lots and sell piece by piece fits.
+
+## What you get
+
+- **A work queue.** Next shows what needs you today: sales to pack and which bin they're in, listings to end,
+  scans that need a look, items ready to list, boxes still to split, and stock that's sat too long. A section
+  only appears when there's something in it.
+- **Scan a box in.** Photograph a box and say what you paid. The agent identifies it in the background, lists
+  the pieces it splits into, and you choose Keep or Sell for each one.
+- **Label first, then put it away.** Print a QR sticker for every piece, then scan a piece's label and the
+  bin's label with your phone camera. The piece is now in that bin and up for sale.
+- **Bins and labels.** Numbered bins (B01, B02…) with printable QR labels on Avery sheets or thermal rolls.
+  Scanning a bin's label opens its contents.
+- **Prices with their evidence.** Targets come from eBay sold listings, and every price keeps the basis it
+  rests on, so you can always see why something is $54.
+- **Listing drafts you paste into eBay.** The agent writes the title and description from the record and the
+  photos. You copy them into eBay yourself, then paste the listing link back.
+- **Record a sale by pasting it.** Paste an eBay order or a quick note ("sold the dice for $70 + $9 shipping")
+  and check what the agent read before it's recorded. If the item was still listed somewhere else, Next tells
+  you to end that listing.
+- **What to do with stock.** Aging stock suggests an offer, a markdown, a bundle or a decision as items sit.
+  When you scan a box, it compares selling it sealed against splitting it, after fees.
+- **Packing and shipping data.** Packed weight, box size and your own packaging presets, copied into the
+  listing the way eBay asks for them.
+- **Check a bin.** Scan everything in a bin and see what's there, what's missing and what's in the wrong bin.
+- **Copy list.** Select items and copy a for-sale post for a group chat: the game system as a header, then
+  `Name NoS — $20` on each line.
+- **Lot P&L.** For every purchase: what it cost, what's left to sell, what's been realized, and the projected
+  net if the rest sells at target.
+
+## How it stays honest
+
+- **It never posts, lists or messages anyone.** Drafts and sales are written for you to check and act on.
+  There's no eBay write access at all.
+- **A price always has a basis.** A target can't be set without saying what it rests on, and the comps are
+  stored with it.
+- **It doesn't invent facts about items.** Model counts it can't see stay unknown, a box's contents come from
+  what it can confirm, and a scan it isn't sure about asks you to pick or type the name.
+- **Sold means a sale was recorded.** An item becomes sold only through a sale record, with its price, fees
+  and postage, never by flipping a status.
+- **Everything is audited.** Every change records who made it (the agent or you in the console) and what
+  changed.
+
+## Quick start
+
+1. **Install it** on an agent you already have:
+
+   ```sh
+   python -m server plugin install https://github.com/protoLabsAI/inventory-plugin
+   ```
+
+   Or in the console: **Plugins → Install from URL**.
+2. **Turn it on** in **Console → Plugins**. It ships disabled.
+3. **Set the basics** in **Settings → Plugins → Inventory**: the workspace directory, and the weekly review
+   if you want it. Every setting is in [configuration.md](docs/configuration.md).
+4. **Open Inventory** from the console's rail. Add bins under **Bins**, then **Scan a box**, or import a
+  spreadsheet from **More → Import CSV**.
+
+Pricing from sold comps uses the [ebay plugin](https://github.com/protoLabsAI/ebay-plugin). Identifying
+photos needs a vision-capable model. A printed label opens its item or bin in the console on protoAgent
+0.227.0 or later; on an older host it shows a page naming the bin or item. Full steps are in
+[Install and setup](docs/install.md).
+
+## Using it
+
+| To | Say something like, or do |
 |---|---|
-| **Tools** | `inventory_summary` · `inventory_list` · `inventory_get` · `inventory_upsert_lot` · `inventory_upsert_item` · `inventory_delete_item` · `inventory_set_price` · `inventory_mark_sold` · `inventory_listing` · `inventory_bins` · `inventory_move_to_bin` · `inventory_packing` · `inventory_import_csv` · `inventory_export_csv` · `inventory_reprice_plan` · `inventory_stale` · `inventory_scan_photos` · `inventory_scan_propose` · `inventory_scan_fail` · `inventory_scan_pricing_done` · `inventory_draft_item` · `inventory_draft_write` · `inventory_draft_fail` · `inventory_sale_candidates` · `inventory_sale_propose` · `inventory_sale_fail` (the scan, draft and sale tools are for the turns the plugin starts) |
-| **View** | a rail panel built around what you ask, not the tables. **Scan** (pinned at the bottom on a phone, in the header on desktop) walks a photo from box to binned pieces: what it is, a photo through the phone's own camera, the agent's identification (pick one of its guesses or type it when it isn't sure), Keep or Sell per piece, prices from sold comps, then a bin for each. **Next** is a work queue (to pack, grouped by bin; scans that need a look, resumable where you left off; ready to list; to split; items not in a bin; stale prices) whose sections only appear when there is something to do; **Stock** filters by lifecycle (for sale, to split, sold, all), with search and one System / Lot filter, list rows on a phone and a table from 640px; **Bins** shows each bin with its count and value, opens a bin's contents (move items in, copy its list), creates bins and prints their **labels**; **Lots** holds the P&L, with each lot's units and sales in its detail. One drawer holds everything about an item: price with its full basis, Record sale, Listing, Keep, Withdraw, Edit, Delete and its history. Multi-select with **Copy list** (also ⌘C) — a for-sale post per game system: the system as a header, then `Name NoS — $20` per line (condition inline, whole-dollar prices). More holds Add item, New lot, CSV import (file or paste, with the mapping report) and export, and a readable History |
-| **API** | bearer-gated JSON under `/api/plugins/inventory` — `summary`, `lots`, `items`, `items/{id}/price`, `items/{id}/sold`, `items/{id}/listings`, `listings/{id}/end`, `listings/to-end`, `sales`, `bins` (list/create/update/delete), `bins/move`, `labels/base`, `labels/sheet`, `to-pack`, `sales/{id}/packed`, `scans` (list/create/get/discard), `scans/{id}/photos` (raw image body; GET one by id), `scans/{id}/retry`, `scans/{id}/confirm`, `scans/{id}/price`, `scans/{id}/finish`, `drafts` (each item's draft state), `drafts/bulk` (at most 10), `items/{id}/draft` (GET the draft / POST to request one), `items/{id}/draft/copied`, `items/{id}/draft/sku-updated`, `items/{id}/draft/live` (the eBay address), `items/{id}/photos.zip`, `sale-pastes` (list/create/get/discard), `sale-pastes/{id}/retry`, `sale-pastes/{id}/record`, `stale`, `audit`, `import`, `export` |
-| **Automations** | `weekly_review: true` arms a plugin-owned recurring turn (`weekly_review_cron`, default Monday 09:00 in `review_timezone`) that re-prices stale evidence from eBay sold comps through the same tools, reports stale listings with a recommendation (it never changes a listing itself), and posts the per-lot P&L. Cancelled when the plugin is disabled. |
-| **Events** | `inventory.item.changed`, `inventory.lot.changed`, `inventory.sale.recorded`, `inventory.imported`, `inventory.bin.changed`, `inventory.sale.packed`, `inventory.scan.changed`, `inventory.draft.changed` |
-| **Skill** | `inventory-ops` — the rules (a target needs a basis; never set sold by hand; sold ≠ active ≠ retail) and the re-price / weekly-review routines |
+| See how you're doing | "How are my lots doing?" · open **Lots** |
+| Bring in a box | **Scan a box**, photograph it, enter what you paid |
+| Put pieces away | **Bins → Put away → Scan with camera**: scan pieces' labels, then the bin's |
+| Find something | **Scan label** on a piece or a bin · "Where's the Halfling team?" |
+| Price stock | "Re-price everything older than a month from sold comps." |
+| List an item | **Draft listing** in its drawer, copy into eBay, then **I listed it** |
+| Record a sale | **Record a sale** on Next and paste the order · "Sold the Goblin team for $39, eBay." |
+| Pack orders | Next → **To pack**, grouped by bin, then **Packed** |
+| Post to a group chat | Select items in **Stock**, then **Copy list** |
+| Deal with slow stock | Next → **Aging stock**: Mark down, Bundle or Snooze |
 
-## The model
+More in [Using it](docs/usage.md).
 
-- **Lot** — a purchase: cost, date, source. P&L is against the lot cost.
-- **Item** — one sellable thing from a lot, optionally tagged with its game **system** (Warhammer 40K, Blood Bowl, …). Status `planned → available → listed → pending → sold`, or `kept` / `withdrawn` (`planned` = a piece that exists once a sealed box is split).
-  Targets low/target/high **with a `price_basis` and a date**.
-- **Price observation** — the comps behind a target (source, n, p25/median/p75, query). Recorded by `inventory_set_price`.
-- **Listing** — where the item is up (channel, url, price).
-- **Bin** — where the item physically is (B01, B02 …). Moves are audited with where it came from. A sale waits on the **pick list** until it is packed; sales from before bins existed are recorded as already packed.
-- **Bin label** — a printable US Letter sheet (3 × 4), each label a QR code, the bin id in large type and its label text. It opens in your browser and you print from there. Every QR encodes `<base>/plugins/inventory/b/<BIN>`, where `<base>` is **Bin label address** in Settings, else the agent's public URL (a fleet member's hub address, which a paired phone on the tailnet can open), else its console. That one public route takes only a bin id and reads no data: on a protoAgent with plugin-view deep links (#4712) it hands off to the console with the bin open (a signed-in browser goes straight on; see **Scan label**); on an older one it says the console needs an update. So printed labels never go stale when the console changes how it opens a view.
-- **Where a sheet opens** (0.10.1) — **in your browser**: a new tab in the web console, your default browser from the desktop app (which hands any http(s) link from a plugin to the system browser and ignores a blank window). The gated `POST /api/plugins/inventory/labels/sheet` renders the sheet and returns a `link` to it; the public `GET /plugins/inventory/sheet/<token>` serves it. The token is 32 random bytes, lives 15 minutes (reloads and print preview are fine), and at most 50 sheets are kept; the sheet holds only what the printed labels show. An unknown or expired link answers a short page with no data. The print dialog always keeps the link too, in case nothing opened.
-- **Item label** (0.10.0) — stickers for individual pieces on **Avery 5160 / 8160** (30 to a US Letter sheet: 2⅝″ × 1″, 0.5″ top/bottom and 3⁄16″ side margins, 2¾″ × 1″ pitch). Each label carries a QR, the name (two lines at most), condition · bin, and the item id, but no price, since that changes and the sticker doesn't. Print it from a Stock selection (**Print labels**), the item drawer (**Print label**), or the last step of a scan (**Print N labels**). **Start at label** reuses a partly used sheet. Print at 100% (Actual size). Every QR encodes `<base>/plugins/inventory/i/<ITEM>`, which works like the bin hop: it's public, takes only an item id, reads no data, and hands off to the console with that item's drawer open (`?item=`), through the same landing page as the bin hop. Printing records `labels_printed_on` on the item, shown in the drawer.
-- **Put away** (0.11.0) — label first, then bin by scanning. A scan now ends by printing labels for the pieces you're selling (no bin picker). Bins ▸ **Put away**: photograph a piece's label to add it to the tray (several pieces is fine), then photograph the bin's label and confirm, and they move into that bin in one audited move; a `planned` piece becomes `available`. The QR is read in the view from the photo (native camera sheet; the vendored jsQR 1.4.0, Apache-2.0, in `vendor/jsqr`), so nothing leaves the page; only this plugin's `/i/` and `/b/` label paths are accepted. A label that won't read: type the item or bin id. `POST /bins/move` takes `put_away: true`.
-- **Live camera** (0.13.0) — Put away ▸ **Scan with camera** opens a viewfinder: point at a piece's label and it's added (a short beep, a green frame); point at the next; point at the bin's label and confirm. Reading pauses while the confirm is open, the same label is ignored for 2.5 s, and the flashlight toggle appears where the phone supports it. The camera starts only on your tap and stops on Done, when the drawer closes or the view is hidden, and after 2 minutes with nothing scanned (Resume brings it back). It works where the console and this view share an origin, as they do through a fleet hub (a same-origin frame may use the camera; no Permissions-Policy header is sent), and falls back to **Take a photo** where it can't: a refused permission says how to allow it (Settings ▸ Safari ▸ Camera), and the desktop app (a cross-origin frame with no camera permission) uses photos. Frames are decoded in the page (the centre square, at most 720 px, about 7 per second, and every third frame the whole picture at most 960 px wide, so a label whose QR is off-centre still reads); nothing is uploaded.
-- **Scan** — a photo the agent identifies in the background. A **box** scan starts its lot at once with what you paid (named "Box scanned …" until confirmed) and proposes the pieces it splits into; a **piece** is scanned alone or into a box being broken down. Photos (up to 3 per scan) are stripped of metadata on upload (HEIC is converted with macOS `sips`) and kept beside the database. After a photo lands the plugin starts one agent turn with `sdk.run_in_session` in that scan's own session (`inventory-scan-<id>`, never your chat): it may not use eBay, pricing tools or subagents and allows two web searches; it answers through `inventory_scan_propose` (or `_fail`). Confirming writes the items (Keep → `kept`, Sell → `planned`) and keeps the correction (the agent's name vs yours) on the scan. **Price the sell pile** starts a second turn that prices from eBay sold comps with `inventory_set_price` and reports what it couldn't price. Binning makes each sell piece `available`. A turn that never answers shows as failed with Retry after **Scan: give up after** (Settings).
-- **Listing drafts** — **Draft listing** on an item (or **Draft N** from Next ▸ Ready to list, at most 10, one after another) starts one agent turn in the item's own session (`inventory-draft-<id>`, never your chat). It reads the item and its scan photos and writes a title (at most 80 characters) and a plain-text description through `inventory_draft_write`, with no eBay, pricing tools or subagents. The draft's price is always the item's target, shown with its basis. Copy the title, price, description and **Custom label (SKU)** — bin first (`B03-<item id>`, capped at eBay's 50 characters), so eBay's own pick list and order search say where it lives — download the photos, list it on eBay yourself, then **I listed it** with the listing's address (`ebay.com/itm/…`, or the app's `ebay.us` share link): that records an eBay listing at the target and marks the item listed. Next asks about drafts copied a day ago but never marked live, and — once you have copied the Custom label — shows **Update the custom label on eBay** when the item moves to another bin (Copy the new label, then Done). Nothing is ever posted for you.
-- **Record a sale by pasting it** — Next ▸ **Record a sale** (also More, and "Paste the order instead" in an item's Record sale dialog). Paste an eBay order email or Seller Hub row, an app's share text, or a note ("sold the dice for $70 + $9 shipping, personal connection"). The plugin starts one cheap agent turn in that paste's own session (`inventory-sale-<id>`, never your chat; no web, no eBay browsing, no subagents) that finds the items with `inventory_sale_candidates` and proposes one line per item with `inventory_sale_propose`: price, shipping charged, fees (the stated fee, or an estimate from the ebay plugin's `ebay_net_proceeds` marked *estimated*, never invented), postage, channel and date. A bundle is split across lines and checked against its total. A weekday-without-a-year date ("Delivered Mon Dec 23") must land on that weekday, and no sale can be dated in the future. Buyer names, addresses and tracking numbers are never copied. The proposal waits under Next ▸ **Sales to check**; you can change the item or any number, remove a line, then **Record N sales** — one audited `mark_sold` per line — and the items land on To pack with their bins. Nothing is recorded until you do. The paste (text, proposal, outcome) stays in this database. A paste that repeats a sale already recorded (the candidates include items sold in the last 180 days, flagged with that sale) is not proposed again: it reads **Already recorded: <item> sold <date> on <channel> for $X** with a link to the item.
-- **Sale** — `net = price + shipping charged − fees − shipping cost`. Selling the last unit closes a live listing **on the same channel** as sold. A live listing on **any other channel** (it sold to a personal connection while still up on eBay) is flagged `needs_end` instead, because nothing here can take it down: Next ▸ **End these listings** shows it with an Open listing link, and **I ended it** marks it ended (audited). A partial sale of a multi-quantity item flags nothing. The agent sees the same list with `inventory_listing(action="to_end")`.
-- **Sealed or split** (0.14.0) — for a box scan, **Price the sell pile** also prices the box itself sealed from eBay sold comps (the same 3-comp rule) and, where the ebay plugin's `ebay_net_proceeds` is available, the fees on the sealed target and on the pieces' targets. That price is kept on the scan through `inventory_scan_sealed_price`, never as an item. The pricing step then shows **Split** (the sell pieces at target) against **Sealed**, net of fees when both fee figures are known and before fees otherwise (it says which), with the difference and a one-line verdict. Sealed has to win by at least $10 or 5% of the split total before it's suggested; an unpriced piece makes the verdict "incomplete". When sealed wins, **Sell it sealed instead…** (confirmed first) removes the planned pieces (snapshotted into the history) and puts one sealed item (NIB, `available`, the sealed price and its comps as basis and evidence) in the lot; it's refused once any piece is kept, for sale, listed or sold. Lot detail shows the same comparison while every piece is still planned. `POST /scans/{id}/sell-sealed`, `GET /lots/{id}/split-check`.
-- **Aging stock** (0.14.0) — Next ▸ **Aging stock** lists unsold items (`available` or `listed`; `planned` and `pending` never age) that have sat past a tier from Settings (**Aging** 45 / 90 / 120 days by default, each 1–730), oldest first, with one suggested move per tier: an offer to watchers or a 10% drop, another drop or a bundle, then decide (clearance, bundle, or pull it). Days count from the live listing's date ("listed"), else from when the item last became listed/available in the audit trail ("not listed" if it isn't up anywhere), else from when it was added; every row says which. We have no marketplace data, so watcher counts are never shown. **Mark down…** opens the Price dialog with the target 10% lower and a stated basis ("Aging markdown, 95 days, no sale"), which you can change before saving; **Bundle…** (pick two or more) drafts a chat message asking the agent to propose a bundle and its price; **Snooze 14 days** hides the item until then (audited). `GET /aging`, `POST /items/{id}/snooze`.
-- **Shipping** (0.15.0) — an item's **packed weight** (pounds + ounces in, stored as whole ounces, partial ounces rounded up the way carriers bill), its **box** (length × width × height in inches, one decimal) and its **packaging**. Packaging presets (name, size, empty weight) are yours to make from More ▸ **Packaging**; none ship with the plugin, so no box size is ever invented. Picking a preset fills the box and adds its empty weight for the packed weight (weigh the item alone); without one, weigh it as it ships. Edit it from the item drawer's **Shipping** row or **Weigh** on a piece in the Put away list (optional, never in the way). The listing draft shows **Package weight** (Copy lb, Copy oz) and **Package size** (L, W, H), the way eBay's form asks for them. Next ▸ Housekeeping counts for-sale items with **no packed weight**. Anything not measured stays blank. `GET/POST /packaging`, `PUT/DELETE /packaging/{id}`, `PUT /items/{id}/shipping`.
-- **Check a bin** (0.15.0) — bin detail ▸ **Check this bin**: scan the label on every piece in it with the live camera (or photos, or a typed id). The drawer shows what's **found** (✓), what's **not scanned yet**, and what **doesn't belong**: in another bin ("In another bin: B05 → move here?"), in no bin ("Not in a bin → move here?"), or sold and packed ("Sold: should not be here"), plus any unknown label. A piece that's sold but not packed yet still counts as found: it's waiting to be picked. **Finish check** saves it in one audited transaction: strays move into the bin, the unscanned can be flagged **missing** (a flag with a date, not a status; the item stays recorded in the bin), and the bin is stamped `checked_on` (the Bins list shows "checked 3 d ago"). Next ▸ Housekeeping counts missing items; one turns up again with a later check, any move, or **Found it** in its drawer. `POST /bins/{id}/check` (`found`, `move_here`, `mark_missing`), `POST /items/{id}/found`.
-- **Scan label** (0.16.0) — on an iPhone, a label scanned with the Camera app always opens in Safari: iOS never hands a link to a home-screen web app, and Safari keeps its own storage, so it isn't signed in. So the view scans its own labels. **Scan label** (header on desktop, beside **Scan a box** on the phone's bottom bar; the box-intake button was renamed from plain "Scan") opens the live camera, with the photo and typed-id fallbacks: an item's label opens its drawer, a bin's opens the bin. A decoded URL is parsed, never opened. The public label hops now answer with a small landing page instead of a bare 302. A browser already signed in to this console (the console's token in this origin's `localStorage`: `protoagent.deviceToken`, else `protoagent.authToken`) goes straight on to the item or bin. Anyone else sees the id and how to open it in the app, plus **Sign in here instead**. The page reads no data (the same for an id that exists and one that doesn't), sends nothing, never puts a token in a URL, and carries `no-store`, `no-referrer` and `noindex`. With JavaScript off, the link still works. On an older host without plugin-view deep links, it is the same "needs an update" page as before.
-- **Label stock** (0.15.0) — the bin and item label dialogs pick what you print on: **Avery 5160 / 8160** (30 to a Letter sheet, 2⅝″ × 1″, the items' default), **Avery 5163 / 8163** (10 to a sheet, 4″ × 2″: 0.5″ top/bottom, 5⁄32″ sides, 3⁄16″ between columns), a **Dymo 30252** address roll (3½″ × 1⅛″), or a **2¼″ × 1¼″ thermal roll** (Dymo 30334, the same size as standard Zebra, Rollo and Brother rolls). The bins' 12-to-a-sheet large squares stay their default. A roll prints one label per page, the page being the label (`@page` sized to it, no margin), so pick your label printer and its label size in the print dialog; sheets keep **Start at label** for a partly used sheet. The QR is at least 0.8″ on every stock and never under 0.6″, below which phone photos and the live camera stop reading it reliably at a hand's distance. The last stock is remembered per kind in this browser (localStorage), not in Settings: it's about the printer beside you. `POST /labels/sheet` takes `stock`; `GET /labels/base` lists the stocks.
-- **Audit** — every mutation, with the actor (`agent` or `console`) and the fields that changed.
+## Documentation
 
-Money is stored as integer cents and exposed as dollars.
+| Doc | What's in it |
+|---|---|
+| [Install and setup](docs/install.md) | Requirements, install, the settings that matter, first steps, phones |
+| [Using it](docs/usage.md) | Each tab and every flow, step by step |
+| [How it works](docs/how-it-works.md) | The data model, the agent turns the plugin starts, labels, the audit trail |
+| [Configuration](docs/configuration.md) | Every setting, its default, and what it does |
+| [Tools](docs/tools.md) | Every agent tool |
+| [HTTP API](docs/api.md) | Every route, operator and public |
+| [Design decisions](docs/design-decisions.md) | Why it's built the way it is |
+| [Development](docs/development.md) | Layout, tests, the view harness, releasing |
+| [Upgrading](docs/upgrading.md) | Notes for versions that change behavior |
 
-## Setup
+## License
 
-```bash
-protoagent plugin install https://github.com/protoLabsAI/inventory-plugin
-```
-
-```yaml
-# langgraph-config.yaml
-plugins:
-  enabled: [inventory]
-inventory:
-  workspace_dir: /path/to/agent/workspace   # relative CSV paths resolve here
-```
-
-The database lives in the host's instance-scoped plugin store, so each agent (and the dev
-sandbox) gets its own. Seed it from a spreadsheet: `inventory_import_csv(path="inventory.csv")`
-maps common headers (`inventory_id`, `item`, `lot_id`, `target_low_usd`, `target_price_usd`,
-`status`, `sold_price_usd`, `price_source` …) and reports what it could not place.
-
-## Development
-
-```bash
-uv venv --python 3.12 .venv && uv pip install -p .venv/bin/python -r requirements-dev.txt ruff
-.venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/python -m pytest -q
-```
-
-The suite is host-free: no protoAgent, no database beyond a temp file.
+MIT, see [LICENSE](LICENSE). The QR encoder is Project Nayuki's QR Code generator (MIT) and the label reader
+is jsQR (Apache-2.0); both are vendored unmodified under `vendor/` with their licences.
