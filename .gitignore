@@ -6,3 +6,5 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+evals/tool_selection/results/
