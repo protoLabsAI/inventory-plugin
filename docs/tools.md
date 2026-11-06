@@ -61,6 +61,6 @@ The plugin starts these turns itself, in a session of their own. See [how-it-wor
 
 | Tool | What it does |
 |---|---|
-| `inventory_sale_candidates` | Find items matching what sold. Items sold in the last 180 days come back flagged with that sale, so a repeat paste is caught |
+| `inventory_sale_candidates` | For the view's **paste-a-sale** turns only. Finds the items a pasted order or note describes, best first, with bin, status, target and any live listing, plus items sold in the last 180 days (so a repeat paste reads as already recorded). A sale you mention in chat is found with `inventory_list` / `inventory_get` and recorded with `inventory_mark_sold`. |
 | `inventory_sale_propose` | Propose one line per item for you to check: price, shipping charged, fees (marked estimated when they are), postage, channel and date. Nothing is recorded until you press Record |
 | `inventory_sale_fail` | Give up on a paste with a reason. `already_recorded` names the item when the paste repeats a recorded sale |
