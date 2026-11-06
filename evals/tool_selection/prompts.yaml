@@ -1,0 +1,94 @@
+# Fixed first-tool selection benchmark for the inventory plugin. Score ONLY the first call.
+# Independent turns: no conversation history and no tool is ever executed. Item ids, lots, bins,
+# prices and URLs are invented. Ids follow the plugin's style (BB-…, KT-…, B01) but match no real
+# inventory.
+#
+# Surface: every tool the plugin registers (including the turn-only scan_*, draft_*, sale_* and
+# scan_pricing_done/scan_sealed_price tools, which the plugin's own turns use) plus four host
+# decoys an operator chat also has: web_search, fetch_url, memory_recall and ebay_price_check
+# (the ebay plugin's sold-comps tool, which the inventory-ops skill names as the first step of
+# a re-price). A turn-only pick on an operator prompt is always wrong.
+#
+# Decisions (from skills/inventory-ops/SKILL.md, documented so the corpus stays honest):
+# - A sale or price named by item NAME (no id) may start with a lookup: inventory_list (query=)
+#   or inventory_get are accepted as well as the action tool. inventory_sale_candidates is a
+#   turn-only tool and is NOT accepted, even though it would find the item.
+# - "Price it from comps" with no comps in the prompt starts with ebay_price_check (rule: comps
+#   first). With the comps given in the prompt it is inventory_set_price. A request that names the
+#   item only by id (BB-014) also accepts inventory_get first: a comps search needs the item's name,
+#   and "keep the current targets" needs the current targets.
+# - "Set it to sold" with no sale price is a trap: rule 3 says never set sold by hand and the
+#   sale needs a price, so the right first move is to ask (none). The same for posting to eBay,
+#   messaging a buyer or ending a live eBay listing: there is no tool, so none.
+# - An explicit "delete X, it's a duplicate" is inventory_delete_item (the operator asked; rule
+#   5 is about asking before deleting on your own initiative).
+# - Bin contents are inventory_list(bin_id=…); the bins themselves are inventory_bins.
+aliases: {}
+
+prompts:
+  - {id: report-01, prompt: "How's the Blood Bowl lot doing? Am I up yet?", expect: [inventory_summary], capability: report}
+  - {id: report-02, prompt: "Give me the P&L across all my lots.", expect: [inventory_summary], capability: report}
+  - {id: report-03, prompt: "What's lot KT-LOT-01 worth if the rest sells at target?", expect: [inventory_summary], capability: report}
+  - {id: report-04, prompt: "how much have I actually made so far, net", expect: [inventory_summary], capability: report}
+
+  - {id: find-01, prompt: "What Blood Bowl stuff do I still have for sale?", expect: [inventory_list], capability: find}
+  - {id: find-02, prompt: "list everything still planned from the combat patrol lot CSM-CP-01", expect: [inventory_list], capability: find}
+  - {id: find-03, prompt: "Show me item BB-014 with its comps and sales.", expect: [inventory_get], capability: find}
+  - {id: find-04, prompt: "do we have any ork boyz left?", expect: [inventory_list], capability: find}
+  - {id: find-05, prompt: "What's the price basis on KT-HC-01?", expect: [inventory_get], capability: find}
+
+  - {id: intake-01, prompt: "bought the chaos space marine combat patrol for 105, splitting it. Start a lot for it.", expect: [inventory_upsert_lot], capability: intake}
+  - {id: intake-02, prompt: "New lot: Kill Team starter, paid $90 at the local store on 2026-10-30.", expect: [inventory_upsert_lot], capability: intake}
+  - {id: intake-03, prompt: "Add a Griff Oberwald, new on sprue, to lot BB-2026-09.", expect: [inventory_upsert_item], capability: intake}
+  - {id: intake-04, prompt: "Add 10 Gretchin NoS to lot ARM-01 under Warhammer 40K.", expect: [inventory_upsert_item], capability: intake}
+  - {id: intake-05, prompt: "BB-014 is actually assembled, not NoS. Fix the condition.", expect: [inventory_upsert_item], capability: intake}
+
+  - {id: price-01, prompt: "Price BB-014 from eBay sold comps.", expect: [inventory_get, ebay_price_check], capability: price}
+  - {id: price-02, prompt: "Set KT-HC-01 to target 65, low 55, high 75: eBay sold comps, 9 sold, median 65, p25 55, p75 75.", expect: [inventory_set_price], capability: price}
+  - {id: price-03, prompt: "what are griff oberwald minis actually selling for on ebay", expect: [ebay_price_check], capability: price}
+  - {id: price-04, prompt: "Record a thin re-price on BB-003: only 2 sold comps at about $40, keep the current targets and say the comps are thin.", expect: [inventory_get, inventory_set_price], capability: price}
+
+  - {id: sale-01, prompt: "sold the griff oberwald for 34 + 5 shipping on ebay", expect: [inventory_list, inventory_get, inventory_mark_sold], capability: sale}
+  - {id: sale-02, prompt: "Record a sale: BB-014 sold on eBay for $46, buyer paid $6.20 shipping, fees $7.10, postage cost $5.80.", expect: [inventory_mark_sold], capability: sale}
+  - {id: sale-03, prompt: "KT-HC-01 went to a friend for 60 cash, no fees, no shipping.", expect: [inventory_mark_sold], capability: sale}
+  - {id: sale-04, prompt: "sold both lootas boxes as a lot for 75 to a friend from the club", expect: [inventory_list, inventory_get, inventory_mark_sold], capability: sale}
+
+  - {id: sale-05, prompt: "BB-003 sold on facebook marketplace for 40, local pickup.", expect: [inventory_mark_sold], capability: sale}
+
+  - {id: listing-01, prompt: "I listed BB-014 on eBay at $49: https://www.ebay.com/itm/100000000001", expect: [inventory_listing], capability: listing}
+  - {id: listing-02, prompt: "Which of my eBay listings are still active for KT-HC-01?", expect: [inventory_get, inventory_listing], capability: listing}
+  - {id: listing-03, prompt: "The eBay listing for BB-003 ended without selling. Mark that listing ended.", expect: [inventory_get, inventory_listing], capability: listing}
+
+  - {id: bins-01, prompt: "Make me five new bins.", expect: [inventory_bins], capability: bins}
+  - {id: bins-02, prompt: "Which bins do I have and how full are they?", expect: [inventory_bins], capability: bins}
+  - {id: bins-03, prompt: "What's in B02?", expect: [inventory_list], capability: bins}
+  - {id: bins-04, prompt: "I just put BB-014 and BB-015 in B03.", expect: [inventory_move_to_bin], capability: bins}
+  - {id: bins-05, prompt: "Rename bin B01 to 'Kill Team boxes'.", expect: [inventory_bins], capability: bins}
+  - {id: bins-07, prompt: "Move KT-HC-01 to bin B05, I reshelved it.", expect: [inventory_move_to_bin], capability: bins}
+  - {id: bins-06, prompt: "Which unsold items aren't in any bin yet?", expect: [inventory_list], capability: bins}
+
+  - {id: pack-01, prompt: "What do I need to pack tonight?", expect: [inventory_packing], capability: pack}
+  - {id: pack-02, prompt: "Sale 12 is packed and shipped.", expect: [inventory_packing], capability: pack}
+  - {id: pack-03, prompt: "Give me the pick list with bins.", expect: [inventory_packing], capability: pack}
+
+  - {id: review-01, prompt: "What's gone stale? Listings and old prices.", expect: [inventory_stale], capability: review}
+  - {id: review-02, prompt: "Give me the re-price worklist, oldest evidence first, max 10.", expect: [inventory_reprice_plan], capability: review}
+  - {id: review-03, prompt: "Which listings have been up too long without selling?", expect: [inventory_stale], capability: review}
+  - {id: review-04, prompt: "Line up the items whose price comps are out of date so we can re-price them.", expect: [inventory_reprice_plan, inventory_stale], capability: review}
+
+  - {id: csv-01, prompt: "Import my spreadsheet at stock/new-haul.csv.", expect: [inventory_import_csv], capability: csv}
+  - {id: csv-04, prompt: "here's the sheet from the show, load inventory/show-buys.csv into the inventory", expect: [inventory_import_csv], capability: csv}
+  - {id: csv-02, prompt: "Export all sales to sales-2026.csv so I can do taxes.", expect: [inventory_export_csv], capability: csv}
+  - {id: csv-03, prompt: "Dump the items in lot BB-2026-09 to a CSV for me.", expect: [inventory_export_csv], capability: csv}
+
+  - {id: delete-01, prompt: "Delete BB-099, it's a duplicate entry I made by mistake.", expect: [inventory_delete_item], capability: delete}
+  - {id: delete-02, prompt: "Remove item KT-TEST-1 entirely, it was a test row.", expect: [inventory_delete_item], capability: delete}
+
+  - {id: chat-01, prompt: "What does NoS mean on a listing?", expect: none, capability: chat}
+  - {id: chat-02, prompt: "Any tips for photographing a sealed box for eBay?", expect: none, capability: chat}
+  - {id: chat-03, prompt: "In general, is it better to sell a combat patrol sealed or split it into units?", expect: none, capability: chat}
+
+  - {id: trap-01, prompt: "Post the Space Marine starter box on eBay for me at $95.", expect: none, capability: trap}
+  - {id: trap-02, prompt: "Just set BB-014's status to sold.", expect: none, capability: trap}
+  - {id: trap-03, prompt: "Message the buyer of BB-014 that it shipped today.", expect: none, capability: trap}
+  - {id: trap-04, prompt: "End my eBay listing for KT-HC-01.", expect: none, capability: trap}

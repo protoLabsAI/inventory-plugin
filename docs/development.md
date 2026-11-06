@@ -25,6 +25,7 @@ Contributor notes: the file layout, the tests, checking the view by hand, and re
 | `skills/inventory-ops` | The agent's skill: the rules and the routines |
 | `docs/` | These pages, plus `design/` (the view redesign spec) |
 | `tests/` | The host-free suite |
+| `evals/tool_selection` | The tool-selection benchmark: prompts, runner and its README |
 
 ## Tests
 
@@ -43,8 +44,23 @@ Tests worth knowing about:
 |---|---|
 | `tests/test_view.py` | The view's four rules (one fetch shim, every call through `apiFetch`, no `--pl-*` definitions, no outside URLs), the public routes (exactly `/view`, `/b/`, `/i/` and `/sheet/`, all GET), and Copy list byte for byte |
 | `tests/test_docs_reference.py` | These docs: every route, tool and setting is documented, nothing removed is, defaults match, links resolve |
+| `tests/test_tool_eval.py` | The tool-selection benchmark: scoring rules, every expected tool registered and none turn-only, every operator tool in two or more prompts, no operator data, a complete dry run |
 | `tests/test_plugin.py` | The manifest: the version matches `pyproject.toml`, it ships disabled, the skill is found, and runtime dependencies come from the host |
 | `tests/test_hardening.py` | Atomic writes, the sold guard, strict money, non-clobbering import |
+
+### The tool-selection eval
+
+`evals/tool_selection/` scores the first tool a model picks for about 50 reseller prompts, without
+running any tool, so a renamed tool, a new tool or a reworded description can be checked against a
+fixed corpus. `tests/test_tool_eval.py` validates the corpus and runs the dry-run plumbing on every
+CI run. A live run needs an OpenAI-compatible endpoint:
+
+```sh
+EVAL_BASE_URL=https://<gateway>/v1 EVAL_API_KEY=… EVAL_MODEL=<model> \
+  python evals/tool_selection/run_eval.py --label before
+```
+
+See [its README](../evals/tool_selection/README.md).
 
 ## Checking the view by hand
 
