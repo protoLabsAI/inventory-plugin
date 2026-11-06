@@ -136,10 +136,39 @@ def start_identify(store, scan: dict, *, timeout_minutes: int, sdk=None) -> dict
     return scan
 
 
+#: The plugin whose tools give sold comps (``ebay_price_check``). Pricing is built on it; without it a
+#: pricing turn has no comps tool and either prices nothing or burns turns on web searches.
+COMPS_PLUGIN = "ebay"
+NO_COMPS_REASON = (
+    "No sold-comps source is installed (the ebay plugin isn't enabled), so nothing was looked up. "
+    "Set a price by hand with Set price, stating what it rests on."
+)
+
+
+def comps_available(sdk=None) -> bool:
+    """Whether the host has the comps plugin enabled. An unknown host (no SDK, or a config without
+    ``plugins_enabled``) is given the benefit of the doubt, as before this check existed."""
+    sdk = sdk if sdk is not None else _sdk()
+    try:
+        enabled = getattr(sdk.config(), "plugins_enabled", None) if sdk is not None else None
+    except Exception:  # noqa: BLE001
+        enabled = None
+    return True if enabled is None else COMPS_PLUGIN in list(enabled)
+
+
 def start_pricing(store, scan: dict, items: list[dict], *, timeout_minutes: int, sdk=None) -> dict:
     box = ""
     if scan.get("kind") == "box" and not scan.get("parent_id") and scan.get("lot_id"):
         box = ((store.get_lot(scan["lot_id"]) or {}).get("name") or "").strip()
+    if not comps_available(sdk):
+        # No comps tool: don't spend an agent turn. Close the pricing at once with every piece
+        # unpriced and the reason, so the view offers Set price instead of waiting.
+        return store.pricing_done(
+            scan["id"],
+            [{"item_id": i["id"], "reason": NO_COMPS_REASON} for i in items],
+            actor="console",
+            timeout_minutes=timeout_minutes,
+        )
     res = enqueue(
         session_for(scan["id"], "price"),
         price_prompt(scan["id"], items, box=box),

@@ -4,6 +4,19 @@ Version notes that change behavior, newest first. Installing or updating through
 database migrations for you: every one is additive, and an older database upgrades in place on first
 open. Take a copy of `inventory.db` before a big jump anyway.
 
+## 0.16.4
+
+- **Price the sell pile needs a comps source.** Without the ebay plugin enabled, it no longer starts an
+  agent turn: every piece comes back unpriced with the reason, so you set prices by hand with **Set
+  price**. With the plugin enabled, nothing changes.
+- **The agent records a sale you mention in chat with `inventory_mark_sold`.** The sale-candidates tool
+  is scoped to the view's paste-a-sale turns, which a tool-selection eval showed both gateway models
+  were wrongly reaching for.
+
+## 0.16.3
+
+- **A tool-selection eval** in `evals/tool_selection/`. No behavior change.
+
 ## 0.16.2
 
 - **Docs only.** The README and `docs/` follow the protoAgent plugin docs standard, and the agent skill

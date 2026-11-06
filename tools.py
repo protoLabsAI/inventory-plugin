@@ -554,7 +554,7 @@ def build_tools(store: InventoryStore, cfg: dict, *, emit=lambda topic, data: No
     # ── pasted sales: the turn the plugin starts on "Record a sale" (sales.py) ─────
     @tool
     def inventory_sale_candidates(query: str, limit: int = 8) -> str:
-        """Find inventory items matching a description of what sold (product name, part number, a few words from an order). Returns the best matches first, each with id, name, condition, system, bin, status, quantity, target price, lot and any live listing. Items already SOLD in the last 180 days are included with status "sold" plus that sale's sold_on, sale_id, channel and price: a paste that repeats one of those is already recorded. Use it in a pasted-sale turn before inventory_sale_propose."""
+        """ONLY for a paste-a-sale turn the Inventory view starts (its prompt names a paste id). When the operator tells you about a sale in chat, find the item with inventory_list or inventory_get and record it with inventory_mark_sold instead. Finds inventory items matching a description of what sold (product name, part number, a few words from an order). Returns the best matches first, each with id, name, condition, system, bin, status, quantity, target price, lot and any live listing. Items already SOLD in the last 180 days are included with status "sold" plus that sale's sold_on, sale_id, channel and price: a paste that repeats one of those is already recorded. Use it in a pasted-sale turn before inventory_sale_propose."""
         try:
             return json.dumps({"ok": True, "items": store.sale_candidates(query, limit=limit)})
         except InventoryError as exc:

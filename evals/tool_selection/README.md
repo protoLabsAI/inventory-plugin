@@ -47,3 +47,18 @@ picked it first for "sold the X for $Y" prompts, instead of `inventory_mark_sold
 `inventory_list` / `inventory_get`. It's read-only, so the harm is an extra step rather than a wrong
 write, but its description should steer chat to `inventory_list` and `inventory_mark_sold`. That's
 the next thing to tune and re-run.
+
+## After tuning `inventory_sale_candidates` (0.16.4)
+
+Its description now opens "ONLY for a paste-a-sale turn the Inventory view starts" and sends a sale
+the operator mentions in chat to `inventory_list` / `inventory_get` and `inventory_mark_sold`.
+
+| Model | Overall | Sale | Turn-only picks |
+|---|---|---|---|
+| `protolabs/fast` | 46/53 (86.8%), up from 81.1% | 3/5, up from 0/5 | 0 |
+| `protolabs/smart` | 48/53 (90.6%), unchanged | 3/5, up from 1/5 | 0 |
+
+Every remaining miss on both models is a read before acting: `inventory_get` or `inventory_list`
+first, such as checking an item before recording a sale on it or before declining a trap. That costs
+a step and writes nothing. smart's trap score moved from 3/4 to 2/4 for that reason, not because it
+did what a trap asked. Single runs at temperature defaults; treat a one-prompt move as noise.

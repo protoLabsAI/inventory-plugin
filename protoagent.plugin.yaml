@@ -1,6 +1,6 @@
 id: inventory
 name: Inventory (resale source of truth)
-version: 0.16.3
+version: 0.16.4
 description: >-
   Inventory for resellers who buy in lots and sell piece by piece. Tracks what you bought, what each
   box split into, which bin every piece is in, what it's worth (eBay sold comps, each price with its
