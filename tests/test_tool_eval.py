@@ -83,7 +83,7 @@ def test_dry_run_writes_results_without_a_network(tmp_path, monkeypatch, capsys)
     assert result["overall"]["total"] == len(prompts)
     assert {r["id"] for r in result["picks"]} == {p["id"] for p in prompts}
     assert result["config_keys"] == []
-    assert "turn-only picks on operator prompts" in capsys.readouterr().out
+    assert "turn-only picks:" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

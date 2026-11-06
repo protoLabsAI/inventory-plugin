@@ -276,8 +276,11 @@ def main(argv=None):
     print(f"{'Capability':<20} {'Correct':>9} {'Accuracy':>10}")
     for capability, stats in [("overall", result["overall"]), *sorted(result["per_capability"].items())]:
         print(f"{capability:<20} {stats['correct']:>3}/{stats['total']:<5} {stats['accuracy']:>9.1%}")
+    # Every prompt is an operator message (chat and trap rows included), and a turn-only pick is
+    # wrong on any of them; count them all, and the tool-expecting rows separately.
     turn_only = sum(r["turn_only_pick"] for r in result["picks"])
-    print(f"turn-only picks on operator prompts: {turn_only}")
+    on_tool_rows = sum(r["turn_only_pick"] for r in result["picks"] if r["expect"] != "none")
+    print(f"turn-only picks: {turn_only} (on prompts that expect a tool: {on_tool_rows})")
     print(f"{'Synthetic dry-run' if args.dry_run else 'Model evaluation'} results: {path}")
     return 0
 

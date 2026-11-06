@@ -26,7 +26,7 @@ EVAL_BASE_URL=https://<gateway>/v1 EVAL_API_KEY=… EVAL_MODEL=<model> \
 A live run posts each prompt to `<EVAL_BASE_URL>/chat/completions` with the tools and
 `tool_choice: auto`, at temperature 0. Results go to `evals/tool_selection/results/<label>.json`
 (gitignored), and a per-capability table is printed. `--config KEY=VALUE` passes plugin settings;
-only the keys are written to the results. Dry-run picks are deterministic noise for checking the
+only the keys are written to the results. A live run stops on the first network or response error and writes no partial results; re-run it. Dry-run picks are deterministic noise for checking the
 plumbing, not a measure of anything.
 
 `tests/test_tool_eval.py` keeps the corpus honest: every expected tool exists, no prompt expects a

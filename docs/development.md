@@ -44,6 +44,7 @@ Tests worth knowing about:
 |---|---|
 | `tests/test_view.py` | The view's four rules (one fetch shim, every call through `apiFetch`, no `--pl-*` definitions, no outside URLs), the public routes (exactly `/view`, `/b/`, `/i/` and `/sheet/`, all GET), and Copy list byte for byte |
 | `tests/test_docs_reference.py` | These docs: every route, tool and setting is documented, nothing removed is, defaults match, links resolve |
+| `tests/test_tool_eval.py` | The tool-selection benchmark: scoring rules, every expected tool registered and none turn-only, every operator tool in two or more prompts, no operator data, a complete dry run |
 | `tests/test_plugin.py` | The manifest: the version matches `pyproject.toml`, it ships disabled, the skill is found, and runtime dependencies come from the host |
 | `tests/test_hardening.py` | Atomic writes, the sold guard, strict money, non-clobbering import |
 
