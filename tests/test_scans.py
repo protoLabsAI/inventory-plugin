@@ -436,3 +436,47 @@ def test_an_explained_condition_lands_as_a_label_with_the_reason_in_notes(store)
     assert p["condition"] == "NIB"
     assert p["notes"] == "Condition: assumed — photo is a stock-style front shot. Contents from retailer listings."
     assert p["contents"][0]["condition"] == "New on sprue"
+
+
+def _host(enabled):
+    """A fake host whose config lists ``enabled`` plugins (None = a config without the field)."""
+    calls = []
+    cfg = types.SimpleNamespace() if enabled is None else types.SimpleNamespace(plugins_enabled=list(enabled))
+    return calls, types.SimpleNamespace(
+        config=lambda: cfg,
+        run_in_session=lambda *a, **k: calls.append(a) or {"ok": True, "job_id": "j"},
+    )
+
+
+def test_pricing_without_a_comps_source_closes_at_once_with_every_piece_unpriced(store):
+    # A Merchant agent without the ebay plugin has no comps tool: a pricing turn would price
+    # nothing or burn turns on web searches. Close it immediately and say why.
+    s = _box_proposed(store)
+    out = store.confirm_scan(s["id"], {"name": "Pyre", "units": [{"name": "Sell A"}, {"name": "Sell B"}]})
+    scan, items = store.request_pricing(s["id"])
+    calls, host = _host(["inventory", "artifact"])
+    done = sc.start_pricing(store, scan, items, timeout_minutes=10, sdk=host)
+    assert calls == []  # no agent turn started
+    assert done["pricing"]["state"] == "done"
+    assert [u["item_id"] for u in done["pricing"]["unpriced"]] == out["item_ids"]
+    assert all(u["reason"] == sc.NO_COMPS_REASON for u in done["pricing"]["unpriced"])
+
+
+@pytest.mark.parametrize(("enabled", "starts"), [(["inventory", "ebay"], True), (None, True)])
+def test_pricing_starts_a_turn_when_comps_are_there_or_the_host_cannot_say(store, enabled, starts):
+    s = _box_proposed(store)
+    store.confirm_scan(s["id"], {"name": "Pyre", "units": [{"name": "Sell A"}]})
+    scan, items = store.request_pricing(s["id"])
+    calls, host = _host(enabled)
+    after = sc.start_pricing(store, scan, items, timeout_minutes=10, sdk=host)
+    assert bool(calls) is starts and after["pricing"]["state"] == "queued"
+
+
+def test_sale_candidates_says_it_is_for_paste_turns_only():
+    # Live eval 2026-11-06: both gateway models picked it first for a chat "sold the X for $Y";
+    # the description now sends chat sales to inventory_list / inventory_get + inventory_mark_sold.
+    from inventory_plugin import tools
+
+    src = __import__("inspect").getsource(tools)
+    assert '"""ONLY for a paste-a-sale turn the Inventory view starts' in src
+    assert "record it with inventory_mark_sold instead" in src
