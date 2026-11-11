@@ -4,6 +4,16 @@ Version notes that change behavior, newest first. Installing or updating through
 database migrations for you: every one is additive, and an older database upgrades in place on first
 open. Take a copy of `inventory.db` before a big jump anyway.
 
+## 0.17.0
+
+- **The camera shows what it read.** In Put away, a **Scanned** list sits right under the video, newest
+  first, so you can see each piece go in without scrolling. Check a bin shows what it has found the same
+  way.
+- **A clearer read.** A quick shutter flash and a green snap of the frame, with the name in a pill on the
+  video (and a short buzz on phones that support it). Already scanned is amber, a QR code that isn't an
+  Inventory label is red. Before, the success flash also borrowed a Stock-list style and briefly
+  re-laid-out the viewfinder.
+
 ## 0.16.4
 
 - **Price the sell pile needs a comps source.** Without the ebay plugin enabled, it no longer starts an

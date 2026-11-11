@@ -156,6 +156,7 @@ def test_the_scanner_opens_items_and_bins_and_never_navigates():
     assert "openItem(it.id)" in fn and "openBin(lab.id)" in fn
     assert "location" not in fn and "window.open" not in fn
     assert "parseLabel(text)" in PAGE[PAGE.index("async function slScan") :][:600]
-    hit = PAGE[PAGE.index("async function camHit") :][:700]
-    assert 'CAM.ctx === "scanlabel"' in hit and "slApply(parseLabel(text))" in hit
+    hit = PAGE[PAGE.index("async function camHit") :][:1400]
+    assert "const lab = parseLabel(text);" in hit  # parsed once, before any context sees it
+    assert 'CAM.ctx === "scanlabel"' in hit and "slApply(lab)" in hit
     assert 'data-cap === "sl" ? slScan(f)' in PAGE.replace("t.dataset.cap", "data-cap")

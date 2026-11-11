@@ -97,8 +97,10 @@ price changes and the sticker doesn't.
 Label first, then bin by scanning:
 
 1. **Bins → Put away**, then **Scan with camera** (or **Take a photo**).
-2. Point at a piece's label. It's added to the list with a short beep. Do the same for as many pieces as are
-   going in the same bin.
+2. Point at a piece's label. The screen flashes, the frame turns green, a beep sounds, and the piece's name
+   shows at the top of the camera and at the top of the **Scanned** list right under it (the newest three,
+   with a count). A label already in the list turns the frame amber ("Already scanned"); a QR code that
+   isn't one of your labels turns it red. Do the same for as many pieces as are going in the same bin.
 3. Point at the bin's label and confirm "Put 3 items in B01?". They move into that bin, and a planned piece
    becomes available.
 
