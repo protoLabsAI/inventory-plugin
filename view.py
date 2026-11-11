@@ -129,11 +129,45 @@ PAGE = r"""<!doctype html>
   .scanbar{display:none}
   .cam{position:relative;width:100%;aspect-ratio:1/1;max-height:60vh;overflow:hidden;border-radius:var(--pl-radius);background:var(--pl-color-bg-inset)}
   .cam video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-  .cam-frame{position:absolute;inset:15%;border:calc(var(--pl-border-width) * 2) solid var(--pl-color-fg);border-radius:var(--pl-radius);opacity:.85;transition:border-color .15s}
-  .cam.hit .cam-frame{border-color:var(--pl-color-status-success);border-width:calc(var(--pl-border-width) * 4)}
-  .cam-hint{position:absolute;left:0;right:0;bottom:var(--pl-space-2);text-align:center;font-size:var(--pl-font-size-sm);color:var(--pl-color-fg)}
+  .cam-frame{position:absolute;inset:15%;border:calc(var(--pl-border-width) * 3) solid rgb(255 255 255 / .9);border-radius:var(--pl-radius-lg);box-shadow:0 0 0 100vmax rgb(0 0 0 / .18);transition:border-color var(--pl-motion-base) var(--pl-motion-ease)}
+  .cam-hint{position:absolute;left:0;right:0;bottom:var(--pl-space-3);text-align:center;font-size:var(--pl-font-size-sm);font-weight:var(--pl-font-weight-medium);color:#fff;text-shadow:0 0 .4em rgb(0 0 0 / .8)}
   .cam-acts{justify-content:space-between;align-items:center}
-  @media (prefers-reduced-motion:reduce){.cam-frame{transition:none}}
+  /* A read (0.17.0): a quick white shutter, the frame snaps green, and a pill names what was read.
+     The classes are cam--*: a bare .hit is the Stock list's tap target, and it used to restyle
+     the whole viewfinder for a moment. */
+  .cam-shutter{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
+  .cam--ok .cam-shutter{animation:cam-shutter .28s ease-out}
+  .cam--ok .cam-frame{border-color:var(--pl-color-status-success);animation:cam-snap .42s var(--pl-motion-ease)}
+  .cam--dup .cam-frame{border-color:var(--pl-color-status-warning)}
+  .cam--bad .cam-frame{border-color:var(--pl-color-status-error);animation:cam-shake .32s var(--pl-motion-ease)}
+  @keyframes cam-shutter{0%{opacity:.7}100%{opacity:0}}
+  @keyframes cam-snap{0%{scale:1}35%{scale:.9}100%{scale:1}}
+  @keyframes cam-shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-2%)}75%{transform:translateX(2%)}}
+  .cam-pill{position:absolute;top:var(--pl-space-3);left:50%;max-width:88%;display:flex;align-items:center;gap:var(--pl-space-1_5);padding:var(--pl-space-1_5) var(--pl-space-3);border-radius:var(--pl-radius-pill);background:rgb(0 0 0 / .72);color:#fff;font-size:var(--pl-font-size-sm);font-weight:var(--pl-font-weight-semibold);white-space:nowrap;opacity:0;transform:translate(-50%,-40%);transition:opacity var(--pl-motion-base) var(--pl-motion-ease),transform var(--pl-motion-base) var(--pl-motion-ease);pointer-events:none}
+  .cam-pill.on{opacity:1;transform:translate(-50%,0)}
+  .cam-pill span{overflow:hidden;text-overflow:ellipsis}
+  .cam-pill i{flex:0 0 auto;width:1.4em;height:1.4em;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:var(--pl-font-size-xs);color:#000;background:var(--pl-color-status-success)}
+  .cam-pill--dup i{background:var(--pl-color-status-warning)}
+  .cam-pill--bad i{background:var(--pl-color-status-error);color:#fff}
+  /* The running list, right under the video: the newest read on top, so a scan is visibly IN
+     without scrolling past a viewfinder that fills the phone, and without covering the aim. */
+  /* 4:3 and at most a third of the screen: on a phone the drawer is a bottom sheet, and the video,
+     the Scanned strip and the first list row all have to fit in it at once (measured at 390x844). */
+  .camwrap{margin-bottom:var(--pl-space-2)}
+  .camwrap .cam{aspect-ratio:4/3;max-height:34vh;border-radius:var(--pl-radius) var(--pl-radius) 0 0}
+  .camwrap .cam-frame{inset:auto;top:50%;left:50%;height:58%;aspect-ratio:1/1;translate:-50% -50%}
+  .camwrap:not(.has-feed) .cam{border-radius:var(--pl-radius)}
+  .cam-feed{margin:0;padding:var(--pl-space-2) var(--pl-space-3);list-style:none;display:flex;flex-direction:column;gap:var(--pl-space-1);border-radius:0 0 var(--pl-radius) var(--pl-radius);background:var(--pl-color-bg-inset);border:var(--pl-border-width) solid var(--pl-color-border);border-top:0;color:var(--pl-color-fg);font-size:var(--pl-font-size-sm)}
+  .cam-feed:empty{display:none}
+  .cam-feed .cf-head{font-size:var(--pl-font-size-xs);font-weight:var(--pl-font-weight-semibold);color:var(--pl-color-fg-muted);text-transform:uppercase;letter-spacing:.06em}
+  .cam-feed .cf-row{display:flex;align-items:center;gap:var(--pl-space-1_5);white-space:nowrap;overflow:hidden}
+  .cam-feed .cf-row span{overflow:hidden;text-overflow:ellipsis}
+  .cam-feed .cf-row b{flex:0 0 auto;color:var(--pl-color-status-success)}
+  .cam-feed .cf-row.old{color:var(--pl-color-fg-muted)}
+  .cam-feed .cf-row.new{animation:cam-in .32s var(--pl-motion-ease)}
+  .cam-feed .cf-more{font-size:var(--pl-font-size-xs);color:var(--pl-color-fg-muted)}
+  @keyframes cam-in{0%{opacity:0;transform:translateY(-60%)}100%{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.cam-frame,.cam-pill{transition:none}.cam--ok .cam-frame,.cam--bad .cam-frame,.cam-feed .cf-row.new{animation:none}.cam--ok .cam-shutter{animation-duration:.01s}}
   @media (max-width:639px){.form{grid-template-columns:1fr}.foot > *,.rowact{min-height:var(--pl-space-12)}.view .scan-top{display:none}.binsel{min-height:var(--pl-space-12)}.scanbar{display:block;padding:var(--pl-space-2) var(--pl-space-4) calc(var(--pl-space-2) + env(safe-area-inset-bottom));border-top:var(--pl-border-width) solid var(--pl-color-border);background:var(--pl-color-bg)}}
   @media (max-width:999px){.col-lot{display:none}}
   @media (max-width:639px){.pline .form{grid-template-columns:1fr 1fr}}
@@ -387,6 +421,21 @@ PAGE = r"""<!doctype html>
     if (!$("#overlay-root").innerHTML) lastFocus = document.activeElement;
     const side = narrow() ? "bottom" : "right";
     const scroll = $("#overlay-root .pl-drawer__body"); const top = scroll ? scroll.scrollTop : 0;
+    // A drawer already open on the same side is updated IN PLACE (0.17.0). Replacing the overlay
+    // replayed the kit's slide-in on every repaint: in Put away the whole sheet dropped and rose
+    // again on each label read.
+    const open = $("#overlay-root .pl-drawer");
+    if (open && open.classList.contains("pl-drawer--" + side)) {
+      $("#overlay-root .pl-drawer__title").innerHTML = title;
+      scroll.innerHTML = body;
+      let ft = $("#overlay-root .pl-drawer__foot");
+      if (foot && !ft) { ft = document.createElement("div"); ft.className = "pl-drawer__foot foot"; open.appendChild(ft); }
+      if (ft) { if (foot) ft.innerHTML = foot; else ft.remove(); }
+      scroll.scrollTop = top;
+      // the focused control may have just been replaced: keep focus inside the aria-modal drawer
+      if (!open.contains(document.activeElement)) open.focus({ preventScroll: true });
+      return;
+    }
     $("#overlay-root").innerHTML = '<div class="pl-overlay pl-overlay--drawer" data-close-bg><div class="pl-drawer pl-drawer--' + side + (side === "bottom" ? " sheet" : "") + '" role="dialog" aria-modal="true" aria-labelledby="dr-title" tabindex="-1">' +
       '<div class="pl-drawer__head"><div class="pl-drawer__title" id="dr-title">' + title + '</div><button class="pl-btn pl-btn--ghost pl-btn--sm" data-act="close">Close</button></div>' +
       '<div class="pl-drawer__body">' + body + "</div>" + (foot ? '<div class="pl-drawer__foot foot">' + foot + "</div>" : "") + "</div></div>";
@@ -1876,15 +1925,62 @@ PAGE = r"""<!doctype html>
       o.start(); o.stop(a.currentTime + 0.08);
     } catch (_) { /* no sound is fine */ }
   }
-  function camFlash() { if (!CAM.el) return; CAM.el.classList.add("hit"); setTimeout(() => CAM.el && CAM.el.classList.remove("hit"), 450); }
+  // What a read looks like (0.17.0). kind: "ok" (in: shutter, green snap, beep, a buzz where the
+  // phone can), "dup" (already in: amber, no shutter), "bad" (not a label we know: red shake).
+  // The class comes off and goes back on with a reflow between, so back-to-back reads each animate.
+  const CAM_SIGNAL_MS = 1600;
+  function camSignal(kind, text, beep = kind === "ok") {
+    const el = CAM.view; if (!el) return;
+    el.classList.remove("cam--ok", "cam--dup", "cam--bad");
+    void el.offsetWidth;
+    el.classList.add("cam--" + kind);
+    if (beep) camBeep();
+    if (kind === "ok") { try { navigator.vibrate && navigator.vibrate(35); } catch (_) { /* no haptics */ } }
+    const pill = CAM.pill;
+    if (pill) {
+      pill.className = "cam-pill cam-pill--" + kind + " on";
+      pill.innerHTML = '<i aria-hidden="true">' + (kind === "ok" ? "✓" : kind === "dup" ? "=" : "!") + "</i><span>" + esc(text || "") + "</span>";
+    }
+    clearTimeout(CAM.signalT);
+    CAM.signalT = setTimeout(() => {
+      if (CAM.view) CAM.view.classList.remove("cam--ok", "cam--dup", "cam--bad");
+      if (CAM.pill) CAM.pill.classList.remove("on");
+    }, CAM_SIGNAL_MS);
+  }
+  // The running list over the video: a heading, the newest CAM_FEED_ROWS names (newest first), and
+  // "+ N more". Only a row not shown last time slides in, so a repaint doesn't replay the list.
+  const CAM_FEED_ROWS = 3;
+  function camFeedHtml(head, names, prev) {
+    if (!names.length) return "";
+    const shown = names.slice(-CAM_FEED_ROWS).reverse();
+    const more = names.length - shown.length;
+    return '<li class="cf-head">' + esc(head) + "</li>" +
+      shown.map((n, k) => '<li class="cf-row' + (k === 0 && !prev.includes(n) ? " new" : k > 0 ? " old" : "") + '"><b aria-hidden="true">✓</b><span>' + esc(n) + "</span></li>").join("") +
+      (more > 0 ? '<li class="cf-more">+ ' + more + " more below</li>" : "");
+  }
+  function camHint(t) { if (CAM.hint && CAM.hint.textContent !== t) CAM.hint.textContent = t; }
+  function camFeed(head, names) {
+    if (!CAM.feed) return;
+    const key = head + "\n" + names.join("\n");
+    if (key !== CAM.feedKey) {  // a repaint with the same list leaves the rows (and their animation) alone
+      CAM.feed.innerHTML = camFeedHtml(head, names, CAM.feedPrev);
+      CAM.feedKey = key; CAM.feedPrev = names.slice(-CAM_FEED_ROWS);
+    }
+    CAM.el.classList.toggle("has-feed", names.length > 0);
+  }
   function camBuild() {
-    const el = document.createElement("div"); el.className = "cam";
+    const wrap = document.createElement("div"); wrap.className = "camwrap";
+    const el = document.createElement("div"); el.className = "cam"; wrap.appendChild(el);
     const v = document.createElement("video");
     v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("autoplay", ""); v.muted = true; v.playsInline = true;
     el.appendChild(v);
     const frame = document.createElement("div"); frame.className = "cam-frame"; el.appendChild(frame);
-    const hint = document.createElement("div"); hint.className = "cam-hint"; hint.textContent = "Point at a label"; el.appendChild(hint);
-    CAM.el = el; CAM.video = v;
+    const hint = document.createElement("div"); hint.className = "cam-hint"; hint.textContent = "Point at a label"; el.appendChild(hint); CAM.hint = hint;
+    const shutter = document.createElement("div"); shutter.className = "cam-shutter"; el.appendChild(shutter);
+    const pill = document.createElement("div"); pill.className = "cam-pill"; pill.setAttribute("aria-hidden", "true"); el.appendChild(pill);
+    const feed = document.createElement("ul"); feed.className = "cam-feed"; feed.setAttribute("aria-hidden", "true"); wrap.appendChild(feed);
+    // CAM.el (what camMount moves between drawers) is the wrapper; CAM.view is the video box.
+    CAM.el = wrap; CAM.view = el; CAM.video = v; CAM.feed = feed; CAM.pill = pill; CAM.feedKey = ""; CAM.feedPrev = [];
     CAM.canvas = document.createElement("canvas"); CAM.g = CAM.canvas.getContext("2d", { willReadFrequently: true });
   }
   // paPaint rebuilds the drawer's HTML: move the live <video> into the new slot instead of
@@ -1952,20 +2048,29 @@ PAGE = r"""<!doctype html>
     const now = Date.now();
     if (!camFresh(CAM.seen, text, now)) return;
     CAM.lastHit = now;
-    if (CAM.ctx === "bincheck") { if (bcApply(parseLabel(text), text)) { camBeep(); camFlash(); } return; }
-    if (CAM.ctx === "scanlabel") { if (slApply(parseLabel(text))) camBeep(); return; }
     const lab = parseLabel(text);
-    if (!lab) { PA.note = "That QR code isn't an Inventory label."; return paPaint(); }
+    const nameOf = (l) => clean((l && l.kind === "item" ? (itemById(l.id) || {}).name : "") || (l ? (l.kind === "bin" ? "Bin " : "") + l.id : ""));
+    if (CAM.ctx === "bincheck") {
+      const fresh = bcApply(lab, text);
+      if (!lab) camSignal("bad", "Not an Inventory label");
+      // a stray is news too: it beeps like a find, in amber
+      else if (fresh) camSignal(BC.found.has(lab.id) ? "ok" : "dup", BC.found.has(lab.id) ? "Found " + nameOf(lab) : nameOf(lab) + " doesn't belong here", true);
+      return;
+    }
+    if (CAM.ctx === "scanlabel") { if (slApply(lab)) camSignal("ok", nameOf(lab)); else if (!lab) camSignal("bad", "Not an Inventory label"); return; }
+    if (!lab) { PA.note = "That QR code isn't an Inventory label."; camSignal("bad", "Not an Inventory label"); return paPaint(); }
     if (lab.kind === "item") {
       const had = PA.ids.includes(lab.id);
       await paApply(lab);
-      if (PA.ids.includes(lab.id) && !had) { camBeep(); camFlash(); }
-      else if (had) paSay(clean((itemById(lab.id) || {}).name || lab.id) + " is already in the list");
+      if (PA.ids.includes(lab.id) && !had) { camSignal("ok", "Added " + nameOf(lab)); CAM.lastItem = lab.id; }
+      else if (had && CAM.lastItem !== lab.id) { camSignal("dup", "Already scanned: " + nameOf(lab)); paSay(nameOf(lab) + " is already in the list"); CAM.lastItem = lab.id; }
+      else if (!had) camSignal("bad", PA.note || "Not added");
+      // had, and it's the piece just read: it's still in view, so say nothing
       return;
     }
     // A bin: stop reading while its confirm is open; resume (or leave, for an empty tray) after.
     CAM.paused = true;
-    camBeep(); camFlash();
+    camSignal(binById(lab.id) ? "ok" : "bad", binById(lab.id) ? "Bin " + lab.id : "No bin " + lab.id + " here");
     try { await paApply(lab); } finally { CAM.paused = false; CAM.lastHit = Date.now(); }
   }
   // Pieces just put away, and their bin's label, are usually still in view: don't add the pieces
@@ -2000,7 +2105,7 @@ PAGE = r"""<!doctype html>
         (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
         '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
       : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
-    const body = '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>" +
+    const body = (CAM.on ? "" : '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>") +
       camUi + (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
       (PA.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
       (PA.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(PA.note) + "</div></div>" : "") +
@@ -2011,7 +2116,10 @@ PAGE = r"""<!doctype html>
     const photo = capBtn("pa", live ? (n ? "Take a photo of the bin's label" : "Take a photo of a label") : (n ? "Scan the bin's label" : "Scan a label"), !live);
     const foot = camBtn + photo + (n ? '<button class="pl-btn block" data-act="pa-clear">Clear the list</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
     paintDrawer("Put away", '<div id="putaway">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) camMount();
+    if (CAM.on) {
+      camMount(); camFeed("Scanned · " + n, PA.ids.map((id) => clean(itemById(id).name)));
+      camHint(n ? "Scan more pieces, or the bin's label" : "Scan a piece's label");
+    }
   }
   const paSay = (t) => { const l = $("#pa-live"); if (l) l.textContent = t; };
   async function paScan(file) {
@@ -2096,7 +2204,7 @@ PAGE = r"""<!doctype html>
     const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
     const foot = camBtn + capBtn("sl", "Take a photo of a label", !live) + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
     paintDrawer("Scan label", '<div id="scanlabel">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) camMount();
+    if (CAM.on) { camMount(); camFeed("", []); camHint("Point at a label"); }
   }
   // True when the label opened something (the caller beeps); false leaves a note and keeps scanning.
   function slApply(lab) {
@@ -2184,7 +2292,7 @@ PAGE = r"""<!doctype html>
     const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
     const foot = camBtn + capBtn("bc", "Take a photo of a label", !live) + '<button class="pl-btn block' + (live ? "" : "") + '" data-act="bc-finish">Finish check</button><button class="pl-btn pl-btn--ghost block" data-act="close">Cancel</button>';
     paintDrawer("Check " + '<span class="bin-id">' + esc(b.id) + "</span>", '<div id="bincheck">' + h + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) camMount();
+    if (CAM.on) { camMount(); camFeed("Found · " + found.length + " of " + expected.length, [...BC.found].map((id) => clean((itemById(id) || { name: id }).name))); camHint("Scan every piece in " + b.id); }
   }
   async function bcScan(file) {
     if (!file || BC.busy) return;

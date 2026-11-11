@@ -208,3 +208,65 @@ def test_every_third_tick_reads_the_whole_frame_so_an_off_centre_label_still_rea
     )
     got = _node(script, str(ROOT / "vendor" / "jsqr" / "jsQR.js"), stdin=json.dumps(frame))
     assert got == [None, {"kind": "item", "id": "NH-SH-Harrows"}]  # the centre crop misses it; the full frame reads it
+
+
+# ── 0.17.0: the viewfinder shows what it read ────────────────────────────────────────────
+
+
+def _feed_fn() -> str:
+    page = _page()
+    return page[page.index("  const CAM_FEED_ROWS") : page.index("  function camFeed(head, names)")]
+
+
+def test_the_feed_lists_the_newest_reads_first_capped_with_a_more_line_and_escaped():
+    esc = "const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');"
+    got = _node(
+        esc
+        + _feed_fn()
+        + "console.log(JSON.stringify({"
+        + " empty: camFeedHtml('Scanned · 0', [], []),"
+        + " one: camFeedHtml('Scanned · 1', ['Ork <Boyz>'], []),"
+        + " six: camFeedHtml('Scanned · 6', ['a','b','c','d','e','f'], ['b','c','d']),"
+        + " again: camFeedHtml('Scanned · 6', ['a','b','c','d','e','f'], ['d','e','f']) }));"
+    )
+    assert got["empty"] == ""
+    assert "Ork &lt;Boyz>" in got["one"] and '<li class="cf-row new">' in got["one"]
+    six = got["six"]
+    order = [six.index(x) for x in ("<span>f<", "<span>e<", "<span>d<")]
+    assert order == sorted(order)  # newest first
+    assert "<span>c<" not in six and "+ 3 more below" in six  # three rows, then a count
+    assert six.count(" new") == 1 and six.count(" old") == 2  # only the fresh read slides in
+    assert " new" not in got["again"]  # nothing new: no row animates
+
+
+def test_a_read_never_borrows_the_stock_lists_hit_class_and_every_outcome_shows():
+    page = _page()
+    cam = page[page.index("  const CAM = {") : page.index("  function openPutAway()")]
+    assert '"hit"' not in cam and ".cam.hit" not in page  # .hit is the Stock row's tap target
+    hit = page[page.index("async function camHit") :][:2200]
+    for kind in ('camSignal("ok"', 'camSignal("dup"', 'camSignal("bad"'):
+        assert kind in hit
+    assert "void el.offsetWidth" in page  # back-to-back reads each replay the animation
+    # The running list is painted onto the video by every drawer that owns the camera.
+    assert page.count("camMount(); camFeed(") == 3
+    style = page[page.index("<style>") : page.index("</style>")]
+    assert "@keyframes cam-shutter" in style and "prefers-reduced-motion" in style
+
+
+def test_a_repaint_updates_the_open_drawer_in_place_instead_of_replaying_its_slide_in():
+    page = _page()
+    fn = page[page.index("  function paintDrawer(") : page.index("  let drawerSeq = 0;")]
+    in_place, rebuild = (
+        fn.index('open.classList.contains("pl-drawer--" + side)'),
+        fn.index('$("#overlay-root").innerHTML ='),
+    )
+    assert in_place < rebuild and "return;" in fn[in_place:rebuild]
+
+
+def test_holding_the_piece_just_read_in_view_stays_quiet():
+    page = _page()
+    hit = page[page.index("async function camHit") :][:2400]
+    item = hit[hit.index('if (lab.kind === "item")') :]
+    item = item[: item.index("return;")]
+    assert 'else if (!had) camSignal("bad"' in item  # never "Not added" for a piece already in
+    assert "else camSignal(" not in item
