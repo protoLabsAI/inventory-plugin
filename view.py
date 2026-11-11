@@ -141,7 +141,7 @@ PAGE = r"""<!doctype html>
   .cam--dup .cam-frame{border-color:var(--pl-color-status-warning)}
   .cam--bad .cam-frame{border-color:var(--pl-color-status-error);animation:cam-shake .32s var(--pl-motion-ease)}
   @keyframes cam-shutter{0%{opacity:.7}100%{opacity:0}}
-  @keyframes cam-snap{0%{transform:scale(1)}35%{transform:scale(.93)}100%{transform:scale(1)}}
+  @keyframes cam-snap{0%{scale:1}35%{scale:.9}100%{scale:1}}
   @keyframes cam-shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-2%)}75%{transform:translateX(2%)}}
   .cam-pill{position:absolute;top:var(--pl-space-3);left:50%;max-width:88%;display:flex;align-items:center;gap:var(--pl-space-1_5);padding:var(--pl-space-1_5) var(--pl-space-3);border-radius:var(--pl-radius-pill);background:rgb(0 0 0 / .72);color:#fff;font-size:var(--pl-font-size-sm);font-weight:var(--pl-font-weight-semibold);white-space:nowrap;opacity:0;transform:translate(-50%,-40%);transition:opacity var(--pl-motion-base) var(--pl-motion-ease),transform var(--pl-motion-base) var(--pl-motion-ease);pointer-events:none}
   .cam-pill.on{opacity:1;transform:translate(-50%,0)}
@@ -151,7 +151,10 @@ PAGE = r"""<!doctype html>
   .cam-pill--bad i{background:var(--pl-color-status-error);color:#fff}
   /* The running list, right under the video: the newest read on top, so a scan is visibly IN
      without scrolling past a viewfinder that fills the phone, and without covering the aim. */
-  .camwrap .cam{border-radius:var(--pl-radius) var(--pl-radius) 0 0;max-height:50vh}
+  /* 4:3 and at most a third of the screen: on a phone the drawer is a bottom sheet, and the video,
+     the Scanned strip and the first list row all have to fit in it at once (measured at 390x844). */
+  .camwrap .cam{aspect-ratio:4/3;max-height:34vh;border-radius:var(--pl-radius) var(--pl-radius) 0 0}
+  .camwrap .cam-frame{inset:auto;top:50%;left:50%;height:58%;aspect-ratio:1/1;translate:-50% -50%}
   .camwrap:not(.has-feed) .cam{border-radius:var(--pl-radius)}
   .cam-feed{margin:0;padding:var(--pl-space-2) var(--pl-space-3);list-style:none;display:flex;flex-direction:column;gap:var(--pl-space-1);border-radius:0 0 var(--pl-radius) var(--pl-radius);background:var(--pl-color-bg-inset);border:var(--pl-border-width) solid var(--pl-color-border);border-top:0;color:var(--pl-color-fg);font-size:var(--pl-font-size-sm)}
   .cam-feed:empty{display:none}
@@ -1938,6 +1941,7 @@ PAGE = r"""<!doctype html>
       shown.map((n, k) => '<li class="cf-row' + (k === 0 && !prev.includes(n) ? " new" : k > 0 ? " old" : "") + '"><b aria-hidden="true">✓</b><span>' + esc(n) + "</span></li>").join("") +
       (more > 0 ? '<li class="cf-more">+ ' + more + " more below</li>" : "");
   }
+  function camHint(t) { if (CAM.hint && CAM.hint.textContent !== t) CAM.hint.textContent = t; }
   function camFeed(head, names) {
     if (!CAM.feed) return;
     const key = head + "\n" + names.join("\n");
@@ -1954,7 +1958,7 @@ PAGE = r"""<!doctype html>
     v.setAttribute("playsinline", ""); v.setAttribute("muted", ""); v.setAttribute("autoplay", ""); v.muted = true; v.playsInline = true;
     el.appendChild(v);
     const frame = document.createElement("div"); frame.className = "cam-frame"; el.appendChild(frame);
-    const hint = document.createElement("div"); hint.className = "cam-hint"; hint.textContent = "Point at a label"; el.appendChild(hint);
+    const hint = document.createElement("div"); hint.className = "cam-hint"; hint.textContent = "Point at a label"; el.appendChild(hint); CAM.hint = hint;
     const shutter = document.createElement("div"); shutter.className = "cam-shutter"; el.appendChild(shutter);
     const pill = document.createElement("div"); pill.className = "cam-pill"; pill.setAttribute("aria-hidden", "true"); el.appendChild(pill);
     const feed = document.createElement("ul"); feed.className = "cam-feed"; feed.setAttribute("aria-hidden", "true"); wrap.appendChild(feed);
@@ -2040,8 +2044,9 @@ PAGE = r"""<!doctype html>
     if (lab.kind === "item") {
       const had = PA.ids.includes(lab.id);
       await paApply(lab);
-      if (PA.ids.includes(lab.id) && !had) camSignal("ok", "Added " + nameOf(lab));
-      else if (had) { camSignal("dup", "Already scanned: " + nameOf(lab)); paSay(nameOf(lab) + " is already in the list"); }
+      if (PA.ids.includes(lab.id) && !had) { camSignal("ok", "Added " + nameOf(lab)); CAM.lastItem = lab.id; }
+      else if (had && CAM.lastItem !== lab.id) { camSignal("dup", "Already scanned: " + nameOf(lab)); paSay(nameOf(lab) + " is already in the list"); CAM.lastItem = lab.id; }
+      // had, and it's the piece just read: it's still in view, so say nothing
       else camSignal("bad", PA.note || "Not added");
       return;
     }
@@ -2082,7 +2087,7 @@ PAGE = r"""<!doctype html>
         (CAM.torch ? '<button class="pl-btn pl-btn--sm" data-act="pa-torch" aria-pressed="' + (CAM.torchOn ? "true" : "false") + '">' + (CAM.torchOn ? "Light off" : "Light") + "</button>" : "") +
         '<button class="pl-btn pl-btn--sm" data-act="pa-camstop">Stop camera</button></div>'
       : CAM.idled ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Paused — tap to resume.</div></div>' : "";
-    const body = '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>" +
+    const body = (CAM.on ? "" : '<p class="muted">' + (n ? "Now scan the label of the bin they go in." : "Scan a piece's label, then the label of the bin it goes in. Scan several pieces first to put them all in one bin.") + "</p>") +
       camUi + (CAM.error ? '<div class="pl-callout pl-callout--' + (CAM.unavailable ? "info" : "warning") + ' gap-t" role="alert"><div class="pl-callout__body">' + esc(CAM.error) + "</div></div>" : "") +
       (PA.busy ? '<div class="pl-callout pl-callout--info gap-t"><div class="pl-callout__body">Reading the label…</div></div>' : "") +
       (PA.note ? '<div class="pl-callout pl-callout--warning gap-t" role="alert"><div class="pl-callout__body">' + esc(PA.note) + "</div></div>" : "") +
@@ -2093,7 +2098,10 @@ PAGE = r"""<!doctype html>
     const photo = capBtn("pa", live ? (n ? "Take a photo of the bin's label" : "Take a photo of a label") : (n ? "Scan the bin's label" : "Scan a label"), !live);
     const foot = camBtn + photo + (n ? '<button class="pl-btn block" data-act="pa-clear">Clear the list</button>' : "") + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
     paintDrawer("Put away", '<div id="putaway">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) { camMount(); camFeed("Scanned · " + n, PA.ids.map((id) => clean(itemById(id).name))); }
+    if (CAM.on) {
+      camMount(); camFeed("Scanned · " + n, PA.ids.map((id) => clean(itemById(id).name)));
+      camHint(n ? "Scan more pieces, or the bin's label" : "Scan a piece's label");
+    }
   }
   const paSay = (t) => { const l = $("#pa-live"); if (l) l.textContent = t; };
   async function paScan(file) {
@@ -2178,7 +2186,7 @@ PAGE = r"""<!doctype html>
     const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
     const foot = camBtn + capBtn("sl", "Take a photo of a label", !live) + '<button class="pl-btn pl-btn--ghost block" data-act="close">Done</button>';
     paintDrawer("Scan label", '<div id="scanlabel">' + body + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) { camMount(); camFeed("", []); }
+    if (CAM.on) { camMount(); camFeed("", []); camHint("Point at a label"); }
   }
   // True when the label opened something (the caller beeps); false leaves a note and keeps scanning.
   function slApply(lab) {
@@ -2266,7 +2274,7 @@ PAGE = r"""<!doctype html>
     const camBtn = live && !CAM.on ? '<button class="pl-btn pl-btn--primary block" data-act="pa-cam">' + (CAM.idled ? "Resume the camera" : "Scan with camera") + "</button>" : "";
     const foot = camBtn + capBtn("bc", "Take a photo of a label", !live) + '<button class="pl-btn block' + (live ? "" : "") + '" data-act="bc-finish">Finish check</button><button class="pl-btn pl-btn--ghost block" data-act="close">Cancel</button>';
     paintDrawer("Check " + '<span class="bin-id">' + esc(b.id) + "</span>", '<div id="bincheck">' + h + "</div>", '<div class="foot sc-foot">' + foot + "</div>");
-    if (CAM.on) { camMount(); camFeed("Found · " + found.length + " of " + expected.length, [...BC.found].map((id) => clean((itemById(id) || { name: id }).name))); }
+    if (CAM.on) { camMount(); camFeed("Found · " + found.length + " of " + expected.length, [...BC.found].map((id) => clean((itemById(id) || { name: id }).name))); camHint("Scan every piece in " + b.id); }
   }
   async function bcScan(file) {
     if (!file || BC.busy) return;
