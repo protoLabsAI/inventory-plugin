@@ -256,5 +256,8 @@ def test_a_read_never_borrows_the_stock_lists_hit_class_and_every_outcome_shows(
 def test_a_repaint_updates_the_open_drawer_in_place_instead_of_replaying_its_slide_in():
     page = _page()
     fn = page[page.index("  function paintDrawer(") : page.index("  let drawerSeq = 0;")]
-    in_place, rebuild = fn.index('open.classList.contains("pl-drawer--" + side)'), fn.index('$("#overlay-root").innerHTML =')
+    in_place, rebuild = (
+        fn.index('open.classList.contains("pl-drawer--" + side)'),
+        fn.index('$("#overlay-root").innerHTML ='),
+    )
     assert in_place < rebuild and "return;" in fn[in_place:rebuild]
