@@ -432,6 +432,8 @@ PAGE = r"""<!doctype html>
       if (foot && !ft) { ft = document.createElement("div"); ft.className = "pl-drawer__foot foot"; open.appendChild(ft); }
       if (ft) { if (foot) ft.innerHTML = foot; else ft.remove(); }
       scroll.scrollTop = top;
+      // the focused control may have just been replaced: keep focus inside the aria-modal drawer
+      if (!open.contains(document.activeElement)) open.focus({ preventScroll: true });
       return;
     }
     $("#overlay-root").innerHTML = '<div class="pl-overlay pl-overlay--drawer" data-close-bg><div class="pl-drawer pl-drawer--' + side + (side === "bottom" ? " sheet" : "") + '" role="dialog" aria-modal="true" aria-labelledby="dr-title" tabindex="-1">' +
@@ -1927,12 +1929,13 @@ PAGE = r"""<!doctype html>
   // phone can), "dup" (already in: amber, no shutter), "bad" (not a label we know: red shake).
   // The class comes off and goes back on with a reflow between, so back-to-back reads each animate.
   const CAM_SIGNAL_MS = 1600;
-  function camSignal(kind, text) {
+  function camSignal(kind, text, beep = kind === "ok") {
     const el = CAM.view; if (!el) return;
     el.classList.remove("cam--ok", "cam--dup", "cam--bad");
     void el.offsetWidth;
     el.classList.add("cam--" + kind);
-    if (kind === "ok") { camBeep(); try { navigator.vibrate && navigator.vibrate(35); } catch (_) { /* no haptics */ } }
+    if (beep) camBeep();
+    if (kind === "ok") { try { navigator.vibrate && navigator.vibrate(35); } catch (_) { /* no haptics */ } }
     const pill = CAM.pill;
     if (pill) {
       pill.className = "cam-pill cam-pill--" + kind + " on";
@@ -2050,7 +2053,8 @@ PAGE = r"""<!doctype html>
     if (CAM.ctx === "bincheck") {
       const fresh = bcApply(lab, text);
       if (!lab) camSignal("bad", "Not an Inventory label");
-      else if (fresh) camSignal(BC.found.has(lab.id) ? "ok" : "dup", BC.found.has(lab.id) ? "Found " + nameOf(lab) : nameOf(lab) + " doesn't belong here");
+      // a stray is news too: it beeps like a find, in amber
+      else if (fresh) camSignal(BC.found.has(lab.id) ? "ok" : "dup", BC.found.has(lab.id) ? "Found " + nameOf(lab) : nameOf(lab) + " doesn't belong here", true);
       return;
     }
     if (CAM.ctx === "scanlabel") { if (slApply(lab)) camSignal("ok", nameOf(lab)); else if (!lab) camSignal("bad", "Not an Inventory label"); return; }
@@ -2060,8 +2064,8 @@ PAGE = r"""<!doctype html>
       await paApply(lab);
       if (PA.ids.includes(lab.id) && !had) { camSignal("ok", "Added " + nameOf(lab)); CAM.lastItem = lab.id; }
       else if (had && CAM.lastItem !== lab.id) { camSignal("dup", "Already scanned: " + nameOf(lab)); paSay(nameOf(lab) + " is already in the list"); CAM.lastItem = lab.id; }
+      else if (!had) camSignal("bad", PA.note || "Not added");
       // had, and it's the piece just read: it's still in view, so say nothing
-      else camSignal("bad", PA.note || "Not added");
       return;
     }
     // A bin: stop reading while its confirm is open; resume (or leave, for an empty tray) after.

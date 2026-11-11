@@ -261,3 +261,12 @@ def test_a_repaint_updates_the_open_drawer_in_place_instead_of_replaying_its_sli
         fn.index('$("#overlay-root").innerHTML ='),
     )
     assert in_place < rebuild and "return;" in fn[in_place:rebuild]
+
+
+def test_holding_the_piece_just_read_in_view_stays_quiet():
+    page = _page()
+    hit = page[page.index("async function camHit") :][:2400]
+    item = hit[hit.index('if (lab.kind === "item")') :]
+    item = item[: item.index("return;")]
+    assert 'else if (!had) camSignal("bad"' in item  # never "Not added" for a piece already in
+    assert "else camSignal(" not in item
