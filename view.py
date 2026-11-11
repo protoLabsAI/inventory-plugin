@@ -153,6 +153,7 @@ PAGE = r"""<!doctype html>
      without scrolling past a viewfinder that fills the phone, and without covering the aim. */
   /* 4:3 and at most a third of the screen: on a phone the drawer is a bottom sheet, and the video,
      the Scanned strip and the first list row all have to fit in it at once (measured at 390x844). */
+  .camwrap{margin-bottom:var(--pl-space-2)}
   .camwrap .cam{aspect-ratio:4/3;max-height:34vh;border-radius:var(--pl-radius) var(--pl-radius) 0 0}
   .camwrap .cam-frame{inset:auto;top:50%;left:50%;height:58%;aspect-ratio:1/1;translate:-50% -50%}
   .camwrap:not(.has-feed) .cam{border-radius:var(--pl-radius)}

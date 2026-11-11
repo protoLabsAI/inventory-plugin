@@ -13,6 +13,10 @@ open. Take a copy of `inventory.db` before a big jump anyway.
   video (and a short buzz on phones that support it). Already scanned is amber, a QR code that isn't an
   Inventory label is red. Before, the success flash also borrowed a Stock-list style and briefly
   re-laid-out the viewfinder.
+- **The drawer holds still.** Repainting an open drawer updates it in place. Before, every label read
+  replayed the bottom sheet's slide-in, so the sheet dropped and rose again on each scan.
+- **The viewfinder fits a phone.** 4:3 and at most a third of the screen, with the instruction on the video,
+  so the camera, the Scanned list and the buttons all fit in the bottom sheet.
 
 ## 0.16.4
 
