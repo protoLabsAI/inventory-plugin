@@ -420,6 +420,19 @@ PAGE = r"""<!doctype html>
     if (!$("#overlay-root").innerHTML) lastFocus = document.activeElement;
     const side = narrow() ? "bottom" : "right";
     const scroll = $("#overlay-root .pl-drawer__body"); const top = scroll ? scroll.scrollTop : 0;
+    // A drawer already open on the same side is updated IN PLACE (0.17.0). Replacing the overlay
+    // replayed the kit's slide-in on every repaint: in Put away the whole sheet dropped and rose
+    // again on each label read.
+    const open = $("#overlay-root .pl-drawer");
+    if (open && open.classList.contains("pl-drawer--" + side)) {
+      $("#overlay-root .pl-drawer__title").innerHTML = title;
+      scroll.innerHTML = body;
+      let ft = $("#overlay-root .pl-drawer__foot");
+      if (foot && !ft) { ft = document.createElement("div"); ft.className = "pl-drawer__foot foot"; open.appendChild(ft); }
+      if (ft) { if (foot) ft.innerHTML = foot; else ft.remove(); }
+      scroll.scrollTop = top;
+      return;
+    }
     $("#overlay-root").innerHTML = '<div class="pl-overlay pl-overlay--drawer" data-close-bg><div class="pl-drawer pl-drawer--' + side + (side === "bottom" ? " sheet" : "") + '" role="dialog" aria-modal="true" aria-labelledby="dr-title" tabindex="-1">' +
       '<div class="pl-drawer__head"><div class="pl-drawer__title" id="dr-title">' + title + '</div><button class="pl-btn pl-btn--ghost pl-btn--sm" data-act="close">Close</button></div>' +
       '<div class="pl-drawer__body">' + body + "</div>" + (foot ? '<div class="pl-drawer__foot foot">' + foot + "</div>" : "") + "</div></div>";
